@@ -1,0 +1,229 @@
+import React, { useCallback, useEffect, useState } from 'react';
+import { USProduct, NutritionData } from '../../types';
+import ProductSelector from '../ProductSelector';
+import LabelCard from '../LabelCard';
+import { AlertCircle } from 'lucide-react';
+import {
+  generateUSLabel1,
+  generateUSCombinedLabel,
+  generateUSTripleLabel,
+  generateUSTripleLargeLabel
+} from '../../services/usPdfGenerator';
+import { generateBarcodeLabel } from '../../services/pdfGenerator';
+import { create4x6VerticalFromSingleLabel } from '../../services/labelFormatter';
+import { useToast } from '../../contexts/ToastContext';
+import { fetchUSMasterData, fetchNutritionData } from '../../services/dataService';
+import EmptyState from '../EmptyState';
+import SkeletonCard from '../SkeletonCard';
+
+const USLabelGeneratorView: React.FC = () => {
+  const { showSuccess, showError } = useToast();
+
+  const [usMasterData, setUSMasterData] = useState<USProduct[]>([]);
+  const [nutritionData, setNutritionData] = useState<NutritionData[]>([]);
+  const [selectedProductName, setSelectedProductName] = useState<string>("");
+  const [selectedWeight, setSelectedWeight] = useState<string>("");
+  const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
+  const [generatingLabel, setGeneratingLabel] = useState<string | null>(null);
+
+  // Load data on mount
+  useEffect(() => {
+    const loadData = async () => {
+      setIsLoadingData(true);
+      setError(null);
+      try {
+        const [usMaster, nutrition] = await Promise.all([
+          fetchUSMasterData(),
+          fetchNutritionData()
+        ]);
+        setUSMasterData(usMaster);
+        setNutritionData(nutrition);
+        setIsLoadingData(false);
+      } catch (err) {
+        console.error(err);
+        const errorMessage = err instanceof Error ? err.message : "Failed to load data from Google Sheets. Please check your connection and try again.";
+        setError(errorMessage);
+        setIsLoadingData(false);
+      }
+    };
+
+    loadData();
+  }, []);
+
+  const getSelectedProductData = useCallback(() => {
+    return usMasterData.find(
+      p => p.Name === selectedProductName && p["Net Weight"] === selectedWeight
+    );
+  }, [usMasterData, selectedProductName, selectedWeight]);
+
+  const handleDownload = async (type: string, generatorFn: () => any | Promise<any>) => {
+    setGeneratingLabel(type);
+    try {
+      // Small delay to allow UI to update to loading state
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      const result = await Promise.resolve(generatorFn());
+      const product = getSelectedProductData();
+      const filename = `${product?.Name?.replace(/[^a-z0-9]/gi, '_')}_US_${type}.pdf`;
+
+      // Handle both jsPDF and Uint8Array results
+      if (result instanceof Uint8Array) {
+        // For Uint8Array (from formatter), create blob and download
+        const blob = new Blob([result], { type: 'application/pdf' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      } else {
+        // For jsPDF, use save method
+        result.save(filename);
+      }
+
+      showSuccess('Label generated', `${type} label downloaded successfully`);
+    } catch (e) {
+      console.error(e);
+      showError('Generation failed', `Error generating ${type} label`);
+    } finally {
+      setGeneratingLabel(null);
+    }
+  };
+
+  const selectedProduct = getSelectedProductData();
+  const hasFnsku = !!selectedProduct?.FNSKU;
+  const nutritionRow = nutritionData.find(n => n.Product === selectedProductName);
+  const canGenerateTriple = !!(selectedProduct && nutritionRow && hasFnsku);
+
+  return (
+    <div className="w-full">
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">US Label Generator</h1>
+        <p className="text-sm text-gray-600 mt-1">Generate US-compliant labels with FDA registration numbers</p>
+      </div>
+
+      {/* Error Alert */}
+      {error && (
+        <div className="bg-red-50 border-l-4 border-red-500 p-4 mb-6 rounded-md shadow-sm">
+          <div className="flex">
+            <AlertCircle className="h-5 w-5 text-red-500 mr-3" />
+            <div>
+              <p className="text-red-700 font-medium">{error}</p>
+              {error.includes('GID') && (
+                <p className="text-red-600 text-sm mt-1">
+                  Please update GOOGLE_SHEETS_USA_URL in constants.ts with the actual GID for the "usa" sheet.
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Product Selector */}
+      <ProductSelector
+        products={usMasterData}
+        selectedProduct={selectedProductName}
+        selectedWeight={selectedWeight}
+        onProductChange={setSelectedProductName}
+        onWeightChange={setSelectedWeight}
+        isLoading={isLoadingData}
+      />
+
+      {/* Action Area */}
+      {isLoadingData ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {[1, 2, 3, 4].map(i => (
+            <SkeletonCard key={i} />
+          ))}
+        </div>
+      ) : selectedProduct ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 animate-fadeIn">
+          <LabelCard
+            title="US Label 1"
+            description="Standard 48x25mm label with Net Weight (kg+oz), M.F.G on, U.S.E By, Batch Code, and FDA Reg. No."
+            isLoading={generatingLabel === 'label1'}
+            onDownload={() => handleDownload('label1', () => generateUSLabel1(selectedProduct))}
+          />
+
+          <LabelCard
+            title="FNSKU Barcode"
+            description="Standard 48x25mm FNSKU barcode label."
+            isDisabled={!hasFnsku}
+            isLoading={generatingLabel === 'barcode'}
+            onDownload={() => handleDownload('barcode', () => generateBarcodeLabel(selectedProduct.FNSKU!))}
+          />
+
+          <LabelCard
+            title="Combined Label"
+            description="Horizontal 96x25mm label combining Label 1 and FNSKU Barcode side-by-side."
+            isDisabled={!hasFnsku}
+            isLoading={generatingLabel === 'combined'}
+            onDownload={() => handleDownload('combined', () => generateUSCombinedLabel(selectedProduct))}
+          />
+
+          <LabelCard
+            title="Triple Label"
+            description="Vertical 50x100mm House label with Name, Ingredients, Allergen Info, Nutritional Info, Label 1, and FNSKU Label."
+            isDisabled={!canGenerateTriple}
+            isLoading={generatingLabel === 'triple'}
+            onDownload={async () => {
+              if (nutritionRow) {
+                await handleDownload('triple', async () => await generateUSTripleLabel(selectedProduct, nutritionRow));
+              }
+            }}
+          />
+        </div>
+      ) : (
+        !isLoadingData && (
+          <EmptyState
+            variant="no-data"
+            title="No product selected"
+            description="Select a product and weight from the dropdown above to generate US labels"
+          />
+        )
+      )}
+
+      {/* 4x6 Format Option - Only show when triple label can be generated */}
+      {!isLoadingData && selectedProduct && canGenerateTriple && (
+        <div className="mt-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 animate-fadeIn">
+            <LabelCard
+              title="House in 4x6 inch (Vertical)"
+              description="4×6 inch format with 3 copies of House label, rotated 90° and stacked vertically."
+              isDisabled={!canGenerateTriple}
+              isLoading={generatingLabel === 'house_4x6'}
+              onDownload={async () => {
+                if (nutritionRow) {
+                  await handleDownload('house_4x6', async () => {
+                    // Generate triple label first
+                    const triplePdf = await generateUSTripleLabel(selectedProduct, nutritionRow);
+                    // Convert to Uint8Array
+                    const tripleBytes = triplePdf.output('arraybuffer');
+                    // Convert to 4x6 format
+                    return create4x6VerticalFromSingleLabel(new Uint8Array(tripleBytes));
+                  });
+                }
+              }}
+            />
+            <LabelCard
+              title="Triple Label (100×150mm)"
+              description="Large 100×150mm House label — same content as Triple Label but printed at full-size scale."
+              isDisabled={!canGenerateTriple}
+              isLoading={generatingLabel === 'triple_large'}
+              onDownload={async () => {
+                if (nutritionRow) {
+                  await handleDownload('triple_large', async () => await generateUSTripleLargeLabel(selectedProduct, nutritionRow));
+                }
+              }}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default USLabelGeneratorView;
