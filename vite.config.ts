@@ -22,6 +22,9 @@ export default defineConfig(({ mode }) => {
       optimizeDeps: {
         exclude: ['pdfjs-dist', 'mupdf']
       },
+      build: {
+        target: 'esnext'
+      },
       worker: {
         format: 'es'
       }
