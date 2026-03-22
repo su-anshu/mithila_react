@@ -307,6 +307,7 @@ const extractQuantity = (
   diagnosticsArray?: import('../types').QuantityDefault[]
 ): number => {
   let qty = 1;
+  let qtyFoundByPattern = false;
   // pdf.js Y-coordinate grouping splits rows into more lines than PyMuPDF.
   // Streamlit uses 6 lines (sufficient for PyMuPDF), but pdf.js needs more because
   // long product descriptions wrap across many Y-groups before reaching the price/qty row.
@@ -330,6 +331,7 @@ const extractQuantity = (
       const potentialQty = parseInt(qtyKeywordMatch[1], 10);
       if (potentialQty >= 1 && potentialQty <= 100) {
         qty = potentialQty;
+        qtyFoundByPattern = true;
         console.log(`[Quantity Extraction] Found qty ${qty} using Qty-keyword pattern: ${qtyLine.trim()}`);
         break;
       }
@@ -342,6 +344,7 @@ const extractQuantity = (
       const potentialQty = parseInt(priceBothSidesMatch[1], 10);
       if (potentialQty >= 1 && potentialQty <= 100) {
         qty = potentialQty;
+        qtyFoundByPattern = true;
         console.log(`[Quantity Extraction] Found qty ${qty} using price-both-sides pattern: ${qtyLine.trim()}`);
         break;
       }
@@ -355,6 +358,7 @@ const extractQuantity = (
       const potentialQty = parseInt(priceMatch[1], 10);
       if (potentialQty >= 1 && potentialQty <= 100) {
         qty = potentialQty;
+        qtyFoundByPattern = true;
         console.log(`[Quantity Extraction] Found qty ${qty} using qty-price-tax pattern: ${qtyLine.trim()}`);
         break;
       }
@@ -376,6 +380,7 @@ const extractQuantity = (
         qtyLine.includes('₹')
       ) {
         qty = potentialQty;
+        qtyFoundByPattern = true;
         console.log(`[Quantity Extraction] Found qty ${qty} using standalone-start pattern: ${qtyLine.trim()}`);
         break;
       }
@@ -383,12 +388,14 @@ const extractQuantity = (
 
   }
 
-  // Backward search fallback: In some Amazon invoices, pdf.js places the ASIN in a
-  // wrapped description line that comes AFTER the price/qty row in Y-coordinate order.
+  // Backward search fallback: In some Amazon invoices, MuPDF places the ASIN in a
+  // wrapped description line that comes AFTER the price/qty row in text order.
   // e.g. Line N:   "Thekua 350g    ₹672.51  3  ₹2,019.54"  (price/qty row)
   //      Line N+k: "B0FLWMFVDN ( thekua 350g p3 )"          (ASIN in wrapped line)
-  // So if forward search found nothing, scan backward from startIndex.
-  if (qty === 1) {
+  // ONLY run backward search if forward search found NO pattern match (defaulted to 1).
+  // If forward search found qty=1 via a pattern, that IS the correct quantity — do NOT
+  // run backward search or it will cross-contaminate with the previous product's qty row.
+  if (!qtyFoundByPattern) {
     const backSearchStart = Math.max(0, startIndex - 12);
     for (let j = startIndex - 1; j >= backSearchStart; j--) {
       const qtyLine = lines[j];
