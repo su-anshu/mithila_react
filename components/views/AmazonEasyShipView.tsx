@@ -1,5 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { Upload, FileText, Download, AlertCircle, Package, Loader2, BarChart3, TrendingUp } from 'lucide-react';
+import DownloadButton from '../../components/DownloadButton';
 import { processAmazonEasyShipExcel, ProcessedOrder, detectMultiItemOrders, applyProductNameMapping, createProductNameMapping } from '../../services/excelProcessor';
 import { generateReportPDF, generateReportExcel, GroupingStyle, Orientation } from '../../services/reportGenerator';
 import SearchableTable from '../../components/SearchableTable';
@@ -144,7 +145,9 @@ const AmazonEasyShipView: React.FC<AmazonEasyShipViewProps> = ({ masterData = []
     const link = document.createElement('a');
     link.href = url;
     
-    const styleSuffix = 'MultiItem';
+    const styleSuffix = groupingStyle.includes('Multi-Item First') ? 'MultiItem'
+      : groupingStyle.includes('Warnings') ? 'WithWarnings'
+      : 'Standard';
     link.download = `EasyShip_${styleSuffix}_${processedOrders.length}_Orders_${new Date().toISOString().split('T')[0].replace(/-/g, '')}.pdf`;
     
     document.body.appendChild(link);
@@ -167,254 +170,189 @@ const AmazonEasyShipView: React.FC<AmazonEasyShipViewProps> = ({ masterData = []
   }, [excelBlob, processedOrders.length]);
 
   return (
-    <div className="w-full max-w-7xl mx-auto space-y-6">
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-        <h2 className="text-2xl font-bold text-gray-900 mb-2">Amazon Easy Ship Report Generator</h2>
-        <p className="text-gray-600">Upload your Amazon Easy Ship Excel file to generate packing reports</p>
-      </div>
+    <div className="w-full max-w-7xl mx-auto space-y-4">
 
-      {/* Master Data Warning */}
+      {/* Master Data Warning — compact banner */}
       {(masterData.length === 0 || masterDataWarning) && (
-        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-          <div className="flex items-start">
-            <AlertCircle className="h-5 w-5 text-yellow-600 mr-2 mt-0.5 flex-shrink-0" />
-            <div>
-              <p className="text-sm text-yellow-800 font-medium">
-                {masterData.length === 0 
-                  ? 'Master data not available' 
-                  : 'Master data issue'}
-              </p>
-              <p className="text-sm text-yellow-700 mt-1">
-                {masterDataWarning || 'Product names may not be cleaned. Master data helps improve product name formatting.'}
-              </p>
-            </div>
-          </div>
+        <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+          <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 text-amber-500" />
+          <span>
+            <strong>{masterData.length === 0 ? 'Master data not available' : 'Master data issue'}:</strong>{' '}
+            {masterDataWarning || 'Product names may not be cleaned.'}
+          </span>
         </div>
       )}
 
-      {/* File Upload Section */}
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 animate-slideIn">
-        <FileUploadZone
-          onFilesSelected={handleFilesSelected}
-          accept=".xlsx,.xls"
-          multiple={false}
-          maxSizeMB={50}
-          disabled={isProcessing}
-          label="Upload Excel File"
-          description="Excel files (.xlsx, .xls) up to 50MB"
-        />
-        
-        {isProcessing && (
-          <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-            <ProgressBar
-              progress={processingProgress * 100}
-              label="Processing file..."
-              showPercentage={true}
-              size="md"
-              color="blue"
-              animated={true}
+      {/* Upload + Stats row */}
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+        <div className="flex items-start gap-4">
+          {/* Upload zone */}
+          <div className="flex-1 min-w-0">
+            <FileUploadZone
+              onFilesSelected={handleFilesSelected}
+              accept=".xlsx,.xls"
+              multiple={false}
+              maxSizeMB={50}
+              disabled={isProcessing}
+              label="Upload Excel File"
+              description="Excel files (.xlsx, .xls) up to 50MB"
             />
+            {isProcessing && (
+              <div className="mt-3">
+                <ProgressBar
+                  progress={processingProgress * 100}
+                  label="Processing file..."
+                  showPercentage={true}
+                  size="sm"
+                  color="blue"
+                  animated={true}
+                />
+              </div>
+            )}
+            {uploadedFile && !isProcessing && (
+              <p className="mt-2 text-xs text-gray-500 flex items-center gap-1">
+                <FileText className="h-3.5 w-3.5" />
+                {uploadedFile.name}
+              </p>
+            )}
           </div>
-        )}
 
-        {uploadedFile && !isProcessing && (
-          <p className="text-sm text-gray-700 mt-2">
-            <FileText className="inline h-4 w-4 mr-1" />
-            {uploadedFile.name}
-          </p>
-        )}
+          {/* Stats — shown inline once processed */}
+          {multiItemStats && processedOrders.length > 0 && (
+            <div className="flex flex-col gap-2 shrink-0 w-52">
+              <div className="flex items-center justify-between bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <Package className="h-4 w-4 text-gray-400" />
+                  <span className="text-xs text-gray-500">Total Orders</span>
+                </div>
+                <span className="text-sm font-bold text-gray-900">{multiItemStats.totalOrders}</span>
+              </div>
+              <div className="flex items-center justify-between bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <BarChart3 className="h-4 w-4 text-amber-400" />
+                  <span className="text-xs text-gray-500">Multi-Item</span>
+                </div>
+                <span className="text-sm font-bold text-amber-700">{multiItemStats.multiItemCount}</span>
+              </div>
+              <div className={`flex items-center justify-between rounded-lg px-3 py-2 border ${
+                multiItemStats.riskLevel === 'High' ? 'bg-red-50 border-red-200' :
+                multiItemStats.riskLevel === 'Medium' ? 'bg-orange-50 border-orange-200' :
+                'bg-green-50 border-green-200'
+              }`}>
+                <div className="flex items-center gap-2">
+                  <TrendingUp className={`h-4 w-4 ${
+                    multiItemStats.riskLevel === 'High' ? 'text-red-400' :
+                    multiItemStats.riskLevel === 'Medium' ? 'text-orange-400' :
+                    'text-green-400'
+                  }`} />
+                  <span className="text-xs text-gray-500">Risk</span>
+                </div>
+                <span className={`text-sm font-bold ${
+                  multiItemStats.riskLevel === 'High' ? 'text-red-700' :
+                  multiItemStats.riskLevel === 'Medium' ? 'text-orange-700' :
+                  'text-green-700'
+                }`}>{multiItemStats.riskLevel}</span>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Empty State */}
-      {!isProcessing && processedOrders.length === 0 && uploadedFile === null && (
-        <EmptyState
-          variant="no-data"
-          title="No file uploaded"
-          description="Upload your Amazon Easy Ship Excel file to generate order reports"
-        />
-      )}
-
-      {/* Order Analysis */}
-      {multiItemStats && processedOrders.length > 0 && (
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Order Analysis</h3>
-          
-          {/* Order count caption */}
-          <p className="text-sm text-gray-600 mb-4">
-            {processedOrders.length} orders processed successfully
-          </p>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="bg-gray-50 rounded-lg p-4">
-              <div className="flex items-center">
-                <Package className="h-5 w-5 text-gray-400 mr-2" />
-                <div>
-                  <p className="text-sm text-gray-600">Total Orders</p>
-                  <p className="text-2xl font-bold text-gray-900">{multiItemStats.totalOrders}</p>
-                </div>
-              </div>
-            </div>
-            <div className="bg-yellow-50 rounded-lg p-4">
-              <div className="flex items-center">
-                <BarChart3 className="h-5 w-5 text-yellow-400 mr-2" />
-                <div>
-                  <p className="text-sm text-gray-600">Multi-Item Orders</p>
-                  <p className="text-2xl font-bold text-yellow-700">{multiItemStats.multiItemCount}</p>
-                </div>
-              </div>
-            </div>
-            <div className={`rounded-lg p-4 ${
-              multiItemStats.riskLevel === 'High' ? 'bg-red-50' :
-              multiItemStats.riskLevel === 'Medium' ? 'bg-orange-50' :
-              'bg-green-50'
-            }`}>
-              <div className="flex items-center">
-                <TrendingUp className={`h-5 w-5 mr-2 ${
-                  multiItemStats.riskLevel === 'High' ? 'text-red-400' :
-                  multiItemStats.riskLevel === 'Medium' ? 'text-orange-400' :
-                  'text-green-400'
-                }`} />
-                <div>
-                  <p className="text-sm text-gray-600">Risk Level</p>
-                  <p className={`text-2xl font-bold ${
-                    multiItemStats.riskLevel === 'High' ? 'text-red-700' :
-                    multiItemStats.riskLevel === 'Medium' ? 'text-orange-700' :
-                    'text-green-700'
-                  }`}>
-                    {multiItemStats.riskLevel}
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {multiItemStats.multiItemCount > 0 ? (
-            <>
-              <div className="mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-md">
-                <p className="text-sm text-yellow-800">
-                  <strong>{multiItemStats.multiItemCount}</strong> orders contain multiple items - require complete packing
-                </p>
-              </div>
-
-              {/* Multi-Item Order Details Expander */}
-              <details className="mt-4 bg-gray-50 border border-gray-200 rounded-lg p-4">
-                <summary className="cursor-pointer text-sm font-semibold text-gray-700 flex items-center gap-2 hover:text-gray-900">
-                  <AlertCircle className="h-4 w-4" />
-                  View Multi-Item Order Details
-                </summary>
-                <div className="mt-4 space-y-3">
-                  {multiItemStats.multiItemOrders.slice(0, 5).map((trackingId) => {
-                    const orderItems = processedOrders.filter(o => o['tracking-id'] === trackingId);
-                    const itemsList = orderItems.map(o => o['product-name']);
-                    return (
-                      <div key={trackingId} className="bg-white p-3 rounded border border-gray-200">
-                        <p className="text-sm font-medium text-gray-900">
-                          <strong>{trackingId}:</strong> {itemsList.join(', ')}
-                        </p>
-                      </div>
-                    );
-                  })}
-                  {multiItemStats.multiItemOrders.length > 5 && (
-                    <p className="text-sm text-gray-600 italic">
-                      ... and {multiItemStats.multiItemOrders.length - 5} more multi-item orders
-                    </p>
-                  )}
-                </div>
-              </details>
-            </>
-          ) : (
-            <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-md">
-              <p className="text-sm text-green-800">
-                All orders are single-item orders - no risk of incomplete packing
-              </p>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Report Generation Options */}
+      {/* Report Generation — compact single row */}
       {processedOrders.length > 0 && (
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 space-y-6">
-          <h3 className="text-lg font-semibold text-gray-900">Report Generation</h3>
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+          <div className="flex items-center justify-between flex-wrap gap-4">
+            {/* Orientation toggle */}
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-medium text-gray-700">Orientation:</span>
+              <div className="flex gap-1 bg-gray-100 rounded-lg p-0.5">
+                {(['Portrait', 'Landscape'] as Orientation[]).map((orient) => (
+                  <button
+                    key={orient}
+                    onClick={() => setOrientation(orient)}
+                    className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+                      orientation === orient
+                        ? 'bg-white text-gray-900 shadow-sm'
+                        : 'text-gray-500 hover:text-gray-700'
+                    }`}
+                  >
+                    {orient}
+                  </button>
+                ))}
+              </div>
+            </div>
 
-          {/* Orientation */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Page Orientation
-            </label>
-            <div className="flex space-x-4">
-              {(['Portrait', 'Landscape'] as Orientation[]).map((orient) => (
-                <label key={orient} className="flex items-center">
-                  <input
-                    type="radio"
-                    name="orientation"
-                    value={orient}
-                    checked={orientation === orient}
-                    onChange={(e) => setOrientation(e.target.value as Orientation)}
-                    className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
-                  />
-                  <span className="ml-2 text-sm text-gray-700">{orient}</span>
-                </label>
-              ))}
+            {/* Action buttons */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleGeneratePDF}
+                disabled={isProcessing}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {isProcessing ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
+                Generate PDF
+              </button>
+              <button
+                onClick={handleGenerateExcel}
+                disabled={isProcessing}
+                className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <Download className="h-4 w-4" />
+                Generate Excel
+              </button>
+              {pdfBytes && (
+                <DownloadButton
+                  onDownload={handleDownloadPDF}
+                  tickSize="h-4 w-4"
+                  className="flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 border border-blue-200 text-sm font-medium rounded-lg hover:bg-blue-100 transition-colors"
+                >
+                  <Download className="h-4 w-4" />
+                  Download PDF
+                </DownloadButton>
+              )}
+              {excelBlob && (
+                <DownloadButton
+                  onDownload={handleDownloadExcel}
+                  tickSize="h-4 w-4"
+                  className="flex items-center gap-2 px-4 py-2 bg-green-50 text-green-700 border border-green-200 text-sm font-medium rounded-lg hover:bg-green-100 transition-colors"
+                >
+                  <Download className="h-4 w-4" />
+                  Download Excel
+                </DownloadButton>
+              )}
             </div>
           </div>
 
-          {/* Generate Buttons */}
-          <div className="flex space-x-4">
-            <button
-              onClick={handleGeneratePDF}
-              disabled={isProcessing}
-              className="flex-1 bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center"
-            >
-              {isProcessing ? (
-                <>
-                  <Loader2 className="animate-spin h-5 w-5 mr-2" />
-                  Generating...
-                </>
-              ) : (
-                <>
-                  <FileText className="h-5 w-5 mr-2" />
-                  Generate PDF Report
-                </>
-              )}
-            </button>
-            <button
-              onClick={handleGenerateExcel}
-              disabled={isProcessing}
-              className="flex-1 bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center"
-            >
-              <Download className="h-5 w-5 mr-2" />
-              Generate Excel Export
-            </button>
-          </div>
-
-          {/* Download Buttons */}
-          {pdfBytes && (
-            <button
-              onClick={handleDownloadPDF}
-              className="w-full bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 flex items-center justify-center"
-            >
-              <Download className="h-5 w-5 mr-2" />
-              Download PDF Report
-            </button>
-          )}
-
-          {excelBlob && (
-            <button
-              onClick={handleDownloadExcel}
-              className="w-full bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 flex items-center justify-center"
-            >
-              <Download className="h-5 w-5 mr-2" />
-              Download Excel File
-            </button>
+          {multiItemStats && multiItemStats.multiItemCount > 0 && (
+            <details className="mt-3">
+              <summary className="cursor-pointer text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-1.5 flex items-center gap-1.5 w-fit">
+                <AlertCircle className="h-3.5 w-3.5" />
+                <strong>{multiItemStats.multiItemCount}</strong> multi-item orders — click to view
+              </summary>
+              <div className="mt-2 space-y-1.5 pl-1">
+                {multiItemStats.multiItemOrders.slice(0, 5).map((trackingId) => {
+                  const items = processedOrders.filter(o => o['tracking-id'] === trackingId).map(o => o['product-name']);
+                  return (
+                    <div key={trackingId} className="bg-gray-50 border border-gray-200 rounded px-3 py-1.5 text-xs text-gray-700">
+                      <strong>{trackingId}:</strong> {items.join(', ')}
+                    </div>
+                  );
+                })}
+                {multiItemStats.multiItemOrders.length > 5 && (
+                  <p className="text-xs text-gray-500 italic pl-1">...and {multiItemStats.multiItemOrders.length - 5} more</p>
+                )}
+              </div>
+            </details>
           )}
         </div>
       )}
 
       {/* Preview Data */}
       {processedOrders.length > 0 && (
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Preview Processed Data</h3>
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200">
+          <div className="px-4 py-3 border-b border-gray-100">
+            <h3 className="text-sm font-semibold text-gray-800">Orders Preview</h3>
+          </div>
           <SearchableTable
             data={processedOrders}
             columns={[
@@ -428,33 +366,17 @@ const AmazonEasyShipView: React.FC<AmazonEasyShipViewProps> = ({ masterData = []
                   </span>
                 )
               },
-              {
-                key: 'asin',
-                label: 'ASIN',
-                sortable: true,
-                className: 'whitespace-nowrap'
-              },
-              {
-                key: 'product-name',
-                label: 'Product Name',
-                sortable: true
-              },
+              { key: 'asin', label: 'ASIN', sortable: true, className: 'whitespace-nowrap' },
+              { key: 'product-name', label: 'Product Name', sortable: true },
               {
                 key: 'qty',
                 label: 'Qty',
                 sortable: true,
-                render: (value) => (
-                  <span className="font-semibold whitespace-nowrap">{value}</span>
-                )
+                render: (value) => <span className="font-semibold whitespace-nowrap">{value}</span>
               },
-              {
-                key: 'pickup-slot',
-                label: 'Pickup Date',
-                sortable: true,
-                className: 'whitespace-nowrap'
-              }
+              { key: 'pickup-slot', label: 'Pickup Date', sortable: true, className: 'whitespace-nowrap' }
             ]}
-            searchPlaceholder="Search by tracking ID, ASIN, product name, or quantity..."
+            searchPlaceholder="Search by tracking ID, ASIN, product name..."
             searchKeys={['tracking-id', 'asin', 'product-name', 'qty', 'pickup-slot']}
             itemsPerPage={20}
             exportFilename={`EasyShip_Orders_${new Date().toISOString().split('T')[0].replace(/-/g, '')}`}

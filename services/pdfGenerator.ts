@@ -492,6 +492,72 @@ export const generateCombinedLabelHorizontal = (product: MasterProduct): jsPDF =
   return doc;
 };
 
+export const generateCombinedVerticalSticker = (product: MasterProduct): jsPDF => {
+  const pageW = 50;
+  const pageH = 25;
+
+  const doc = new jsPDF({
+    orientation: 'landscape',
+    unit: 'mm',
+    format: [pageW, pageH]
+  });
+
+  const name = product['item_name_for_labels'] || product.Name || 'Unknown';
+  const weight = product['Net Weight'] || 'N/A';
+  const mrpRaw = product['M.R.P'] || product.MRP;
+  const mrp = mrpRaw ? `INR ${Math.round(parseFloat(mrpRaw))}` : 'INR N/A';
+  const fssaiRaw = product['M.F.G. FSSAI'] || product.FSSAI;
+  const fssai = fssaiRaw ? String(Math.round(parseFloat(fssaiRaw))) : 'N/A';
+
+  const today = new Date();
+  const mfgDate = format(today, 'dd MMM yyyy').toUpperCase();
+  const dateCode = format(today, 'ddMMyy');
+  const expiryVal = product['Expiry '] || product.Expiry || product.EXPIRY || product['Shelf Life'] || product.Shelf_Life || product.ShelfLife || product['Expiry Months'];
+  const useByDate = parseExpiry(expiryVal);
+  const useByStr = format(useByDate, 'dd MMM yyyy').toUpperCase();
+  const batchCode = generateBatchCode(name, dateCode);
+
+  // --- Page 1: MRP label (50x25mm) ---
+  const margin = 2;
+  const lineSpacing = 3.2;
+  const numLines = 6;
+  const approximateLineHeight = 2.5;
+  const totalContentHeight = (numLines - 1) * lineSpacing + approximateLineHeight;
+  const availableHeight = pageH - margin * 2;
+  const topSpace = (availableHeight - totalContentHeight) / 2;
+  const firstLineY = margin + topSpace + approximateLineHeight / 2;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(6);
+  doc.text(`Name: ${name.substring(0, 38)}`, margin, firstLineY);
+  doc.text(`Net Weight: ${weight} Kg`, margin, firstLineY + lineSpacing);
+  doc.text(`M.R.P: ${mrp}`, margin, firstLineY + lineSpacing * 2);
+  doc.text(`M.F.G: ${mfgDate} | USE BY: ${useByStr}`, margin, firstLineY + lineSpacing * 3);
+  doc.text(`Batch Code: ${batchCode}`, margin, firstLineY + lineSpacing * 4);
+  doc.text(`M.F.G FSSAI: ${fssai}`, margin, firstLineY + lineSpacing * 5);
+
+  // --- Page 2: Barcode label (50x25mm) ---
+  doc.addPage([pageW, pageH], 'landscape');
+
+  const fnsku = product.FNSKU;
+  if (fnsku) {
+    const barcodeW = 37;
+    const barcodeH = 10;
+    const imgData = createBarcodeDataUrl(fnsku, false);
+    const barcodeX = pageW / 2 - barcodeW / 2;
+    const barcodeY = 5;
+    doc.addImage(imgData, 'PNG', barcodeX, barcodeY, barcodeW, barcodeH);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7);
+    doc.text(fnsku, pageW / 2, barcodeY + barcodeH + 3.5, { align: 'center' });
+  } else {
+    doc.setFontSize(8);
+    doc.text("No FNSKU", 2, 12);
+  }
+
+  return doc;
+};
+
 export const generateTripleLabel = async (product: MasterProduct, nutrition: NutritionData): Promise<jsPDF> => {
   const doc = new jsPDF({
     orientation: 'portrait',

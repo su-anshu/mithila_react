@@ -8,29 +8,27 @@ interface LabelPreviewProps {
   labelSize: LabelSize;
   includeDate: boolean;
   showBoth?: boolean;
+  fontSizeMultiplier?: number;
 }
 
 const LabelPreview: React.FC<LabelPreviewProps> = ({
   productName,
   labelSize,
   includeDate,
-  showBoth = false
+  showBoth = false,
+  fontSizeMultiplier = 1
 }) => {
   const currentDate = format(new Date(), 'dd/MM/yyyy');
   
   // Calculate aspect ratio and dimensions for preview
   const getLabelDimensions = (size: LabelSize) => {
     switch (size) {
-      case '48x25mm':
-        return { width: 192, height: 100, isVertical: false }; // 4:1 ratio scaled
-      case '96x25mm':
-        return { width: 384, height: 100, isVertical: false }; // 4:1 ratio scaled
-      case '50x100mm':
-        return { width: 100, height: 200, isVertical: true }; // 1:2 ratio scaled
-      case '100x50mm':
-        return { width: 200, height: 100, isVertical: false }; // 2:1 ratio scaled
-      default:
-        return { width: 192, height: 100, isVertical: false };
+      case '48x25mm':  return { width: 192, height: 100, isVertical: false };
+      case '96x25mm':  return { width: 288, height: 75,  isVertical: false };
+      case '50x25mm':  return { width: 200, height: 100, isVertical: false };
+      case '150x100mm':return { width: 270, height: 180, isVertical: false };
+      case '100x50mm': return { width: 240, height: 120, isVertical: false };
+      default:         return { width: 192, height: 100, isVertical: false };
     }
   };
 
@@ -53,15 +51,21 @@ const LabelPreview: React.FC<LabelPreviewProps> = ({
       {/* Label content */}
       <div className={`flex flex-col items-center justify-center text-center ${dimensions.isVertical ? 'space-y-2' : 'space-y-1'}`}>
         <div className="flex items-center justify-center mb-1">
-          <Package className={`${dimensions.isVertical ? 'h-4 w-4' : 'h-3 w-3'} text-gray-400 mr-1`} />
-          <span className={`font-bold text-gray-900 break-words ${dimensions.isVertical ? 'text-sm' : 'text-xs'}`}>
+          <Package className="h-3 w-3 text-gray-400 mr-1 flex-shrink-0" />
+          <span
+            className="font-bold text-gray-900 break-words text-center"
+            style={{ fontSize: `${Math.round(11 * fontSizeMultiplier)}px` }}
+          >
             {displayText}
           </span>
         </div>
         {withDate && (
           <div className="flex items-center justify-center">
-            <Calendar className={`${dimensions.isVertical ? 'h-3 w-3' : 'h-2 w-2'} text-gray-400 mr-1`} />
-            <span className={`font-semibold text-gray-700 ${dimensions.isVertical ? 'text-xs' : 'text-[10px]'}`}>
+            <Calendar className="h-2 w-2 text-gray-400 mr-1 flex-shrink-0" />
+            <span
+              className="font-semibold text-gray-700"
+              style={{ fontSize: `${Math.round(9 * fontSizeMultiplier)}px` }}
+            >
               {currentDate}
             </span>
           </div>

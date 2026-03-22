@@ -13,23 +13,6 @@ interface ShippingLabelProduct {
   qty: number;
 }
 
-/**
- * Page data for sorting
- */
-interface PageData {
-  pageNum: number;
-  useCropped: boolean;
-  productName: string;
-  weight: string;
-  skuId: string;
-  maxQty: number;
-  totalQty: number;
-  hasDuplicates: boolean;
-  sortKey: [string, string, string];
-  products: ShippingLabelProduct[];
-  pdfBytes: Uint8Array;
-  cropDimensions: { cropX0: number; cropY0: number; cropWidth: number; cropHeight: number } | null;
-}
 
 /**
  * Smart text joining that preserves spacing and table structure
@@ -292,419 +275,92 @@ const highlightLargeQtyFlipkart = async (
 };
 
 /**
- * Sort Flipkart invoice PDFs by product name/SKU and highlight quantities > 1
- * 
- * Process:
- * 1. For each page: crop to shipping label section
- * 2. Extract product info from shipping label
- * 3. Sort pages by (product_name, weight, sku_id)
- * 4. Apply highlighting to pages with qty > 1
- * 5. Return sorted PDF with only shipping labels
- * 
+ * Generate a cropped + highlighted PDF from Flipkart invoices.
+ * Pages are kept in original order. Multi-qty pages are highlighted.
+ * Each page is cropped to show only the shipping label section.
+ *
  * @param allPdfBytes Array of PDF file bytes
- * @returns Sorted PDF bytes or null if error
+ * @returns PDF bytes or null if error
  */
 export const sortPdfBySkuFlipkart = async (
   allPdfBytes: Uint8Array[]
 ): Promise<Uint8Array | null> => {
-  console.log(`[Flipkart Sorted PDF] === sortPdfBySkuFlipkart() called with ${allPdfBytes.length} PDF files ===`);
-  
-  if (!allPdfBytes || allPdfBytes.length === 0) {
-    console.error('[Flipkart Sorted PDF] ❌ No PDF bytes provided');
-    return null;
-  }
-  
-  // Validate PDF bytes
-  for (let i = 0; i < allPdfBytes.length; i++) {
-    if (!allPdfBytes[i] || allPdfBytes[i].length === 0) {
-      console.error(`[Flipkart Sorted PDF] ❌ PDF bytes at index ${i} is empty or invalid`);
-      return null;
-    }
-  }
-  
-  try {
-    // Combine all PDFs into one document first
-    const combinedPdf = await PDFDocument.create();
-    const pageDataList: PageData[] = [];
+  console.log(`[Flipkart PDF] Generating cropped+highlighted PDF from ${allPdfBytes.length} file(s)`);
 
-    // Process each PDF file
+  if (!allPdfBytes || allPdfBytes.length === 0) return null;
+
+  try {
+    const outputPdf = await PDFDocument.create();
+
     for (let pdfIdx = 0; pdfIdx < allPdfBytes.length; pdfIdx++) {
       const pdfBytes = allPdfBytes[pdfIdx];
-      
-      try {
-        // Load PDF with pdf-lib for manipulation
-        const sourcePdf = await PDFDocument.load(pdfBytes);
-        const totalPages = sourcePdf.getPageCount();
+      if (!pdfBytes || pdfBytes.length === 0) continue;
 
-        console.log(`[Flipkart Sorted PDF] PDF ${pdfIdx + 1}: ${totalPages} pages`);
+      const sourcePdf = await PDFDocument.load(pdfBytes);
+      const totalPages = sourcePdf.getPageCount();
+      console.log(`[Flipkart PDF] File ${pdfIdx + 1}: ${totalPages} pages`);
 
-        if (totalPages === 0) {
-          console.warn(`[Flipkart Sorted PDF] Empty PDF at index ${pdfIdx}`);
-          continue;
-        }
+      // Load with pdf.js for text extraction (to detect multi-qty)
+      const pdfjsDoc = await pdfjsLib.getDocument({ data: pdfBytes.slice() }).promise;
 
-        // Also load with pdf.js for text extraction
-        const pdfjsDoc = await pdfjsLib.getDocument({ data: pdfBytes }).promise;
-
-        // Process each page
-        for (let pageNum = 0; pageNum < totalPages; pageNum++) {
-          try {
-            console.debug(`[Flipkart Sorted PDF] Processing page ${pageNum + 1}/${totalPages} of PDF ${pdfIdx + 1}`);
-
-            // Get crop dimensions for shipping label section
-            const originalPage = sourcePdf.getPage(pageNum);
-            const { width: pageWidth, height: pageHeight } = originalPage.getSize();
-            const cropDimensions = getCropDimensions(pageWidth, pageHeight);
-            const useCropped = cropDimensions !== null;
-
-            if (!useCropped) {
-              console.warn(`[Flipkart Sorted PDF] ⚠️ Could not crop page ${pageNum + 1}, using full page as fallback`);
-            }
-
-            // Extract product info from shipping label (or full page if crop failed)
-            let shippingLabelText = '';
-            try {
-              const pdfjsPage = await pdfjsDoc.getPage(pageNum + 1); // pdf.js uses 1-based indexing
-              const textContent = await pdfjsPage.getTextContent();
-              shippingLabelText = smartJoinTextItems(textContent.items);
-              console.debug(`[Flipkart Sorted PDF] Page ${pageNum + 1} text length: ${shippingLabelText.length} chars`);
-            } catch (textError) {
-              console.error(`[Flipkart Sorted PDF] Could not extract text from page ${pageNum + 1}:`, textError);
-              continue;
-            }
-
-            const products = extractProductFromShippingLabel(shippingLabelText);
-            console.debug(`[Flipkart Sorted PDF] Page ${pageNum + 1} extracted ${products.length} products`);
-
-            // Get primary product for sorting (use first product or aggregate)
-            let productName = '';
-            let weight = '';
-            let skuId = '';
-            let maxQty = 1;
-            let totalQty = 1;
-            let hasDuplicates = false;
-
-            if (products.length > 0) {
-              // Use first product as primary (most invoices have single product)
-              const primaryProduct = products[0];
-              productName = primaryProduct.productName;
-              weight = primaryProduct.weight;
-              skuId = primaryProduct.skuId;
-
-              // Calculate max_qty (individual max) and total_qty (sum of all quantities)
-              maxQty = Math.max(...products.map(p => p.qty));
-
-              // Calculate total_qty: sum of all quantities
-              totalQty = products.reduce((sum, p) => sum + p.qty, 0);
-
-              // Check if same product appears multiple times
-              if (products.length > 1) {
-                const productIdentifiers = new Set<string>();
-                for (const p of products) {
-                  const pName = (p.productName || '').trim().toLowerCase();
-                  const pWeight = (p.weight || '').trim().toLowerCase();
-                  if (pName && pWeight) {
-                    const identifier = `${pName}|${pWeight}`;
-                    if (productIdentifiers.has(identifier)) {
-                      hasDuplicates = true;
-                      break;
-                    }
-                    productIdentifiers.add(identifier);
-                  }
-                }
-              }
-
-              console.log(`[Flipkart Sorted PDF] Page ${pageNum + 1}: max_qty=${maxQty}, total_qty=${totalQty}, has_duplicates=${hasDuplicates}, products=${products.length}`);
-            } else {
-              console.warn(`[Flipkart Sorted PDF] ⚠️ Page ${pageNum + 1}: No products extracted`);
-            }
-
-            // Create sort key
-            const sortKey: [string, string, string] = [
-              productName || 'ZZZ_NO_NAME',
-              weight || 'ZZZ_NO_WEIGHT',
-              skuId || 'ZZZ_NO_SKU'
-            ];
-
-            // Store page data
-            pageDataList.push({
-              pageNum,
-              useCropped,
-              productName,
-              weight,
-              skuId,
-              maxQty,
-              totalQty,
-              hasDuplicates,
-              sortKey,
-              products,
-              pdfBytes, // Keep reference to PDF bytes for fallback
-              cropDimensions,
-            });
-          } catch (error) {
-            console.error(`[Flipkart Sorted PDF] ❌ Error processing page ${pageNum + 1}:`, error);
-            continue;
-          }
-        }
-      } catch (error) {
-        console.error(`[Flipkart Sorted PDF] ❌ Error processing PDF ${pdfIdx + 1}:`, error);
-        continue;
-      }
-    }
-
-    console.log(`[Flipkart Sorted PDF] Processed ${pageDataList.length} pages out of all PDFs`);
-
-    if (pageDataList.length === 0) {
-      console.error('[Flipkart Sorted PDF] ❌ No pages could be processed - returning null');
-      console.error('[Flipkart Sorted PDF] Debug info:', {
-        totalPdfFiles: allPdfBytes.length,
-        pdfSizes: allPdfBytes.map((b, i) => ({ index: i, size: b.length }))
-      });
-      return null;
-    }
-
-    // Sort pages by product name, weight, SKU
-    console.log(`[Flipkart Sorted PDF] Sorting ${pageDataList.length} pages...`);
-    pageDataList.sort((a, b) => {
-      // Compare sort keys lexicographically
-      for (let i = 0; i < 3; i++) {
-        const cmp = a.sortKey[i].localeCompare(b.sortKey[i]);
-        if (cmp !== 0) return cmp;
-      }
-      return 0;
-    });
-
-    // Create new PDF with sorted cropped pages
-    console.log('[Flipkart Sorted PDF] Creating sorted PDF document...');
-    const sortedPdf = await PDFDocument.create();
-    const highlightingInfo: Array<{ pageIndex: number; products: ShippingLabelProduct[]; totalQty: number; hasDuplicates: boolean }> = [];
-
-    // FIRST PASS: Insert all pages into sortedPdf (without highlighting)
-    for (let idx = 0; idx < pageDataList.length; idx++) {
-      const pageInfo = pageDataList[idx];
-      const { useCropped, totalQty, products, hasDuplicates, cropDimensions } = pageInfo;
-
-      // Determine if this page needs highlighting
-      const shouldHighlight = totalQty > 1 || products.length > 1;
-
-      try {
-        const sourcePdf = await PDFDocument.load(pageInfo.pdfBytes);
-        const originalPage = sourcePdf.getPage(pageInfo.pageNum);
-
-        if (useCropped && cropDimensions) {
-          // Create cropped page using proper PDF embedding approach
-          const { cropX0, cropY0, cropWidth, cropHeight } = cropDimensions;
-          
-          // Get original page size for reference
-          const { width: originalWidth, height: originalHeight } = originalPage.getSize();
-          
-          console.debug(`[Flipkart Sorted PDF] Cropping page ${idx + 1}: original=${originalWidth.toFixed(1)}x${originalHeight.toFixed(1)}, crop=${cropWidth.toFixed(1)}x${cropHeight.toFixed(1)}, offset=(${cropX0.toFixed(1)}, ${cropY0.toFixed(1)})`);
-          
-          try {
-            // Copy the page from source PDF to sortedPdf (this creates a page reference we can draw)
-            // Note: sourcePdf is already loaded above, reuse it
-            const [copiedPage] = await sortedPdf.copyPages(sourcePdf, [pageInfo.pageNum]);
-            
-            // Create new page with cropped dimensions
-            const newPage = sortedPdf.addPage([cropWidth, cropHeight]);
-            
-            // Calculate offsets to show only the cropped region
-            // In pdf-lib: bottom-left origin, so we need to adjust Y coordinate
-            // cropY0 is distance from top, convert to bottom-left coordinates
-            const xOffset = -cropX0;
-            const yOffset = -(originalHeight - cropY0 - cropHeight);
-            
-            // Validate offsets are reasonable (content should be partially visible)
-            // If offsets are too large (more than page size), content will be completely outside bounds
-            const maxOffsetX = cropWidth * 0.5; // Allow up to 50% of page width as offset
-            const maxOffsetY = cropHeight * 0.5; // Allow up to 50% of page height as offset
-            
-            if (Math.abs(xOffset) > maxOffsetX || Math.abs(yOffset) > maxOffsetY) {
-              console.warn(`[Flipkart Sorted PDF] ⚠️ Large offsets detected for page ${idx + 1}: xOffset=${xOffset.toFixed(1)}, yOffset=${yOffset.toFixed(1)}. This may cause content to be outside visible bounds.`);
-            }
-            
-            // Draw copied page with negative offsets to show only cropped region
-            // The page size naturally clips the content outside the bounds
-            newPage.drawPage(copiedPage, {
-              x: xOffset,
-              y: yOffset,
-              xScale: 1,
-              yScale: 1
-            });
-            
-            // Verify page was created successfully
-            const pageCountAfter = sortedPdf.getPageCount();
-            if (pageCountAfter === 0) {
-              throw new Error('Page was not added to PDF - page count is 0');
-            }
-            
-            console.debug(`[Flipkart Sorted PDF] ✅ Successfully added cropped page ${idx + 1} using drawPage method (xOffset=${xOffset.toFixed(1)}, yOffset=${yOffset.toFixed(1)})`);
-          } catch (drawError) {
-            const errorMessage = drawError instanceof Error ? drawError.message : String(drawError);
-            console.error(`[Flipkart Sorted PDF] Error cropping page ${idx + 1} with drawPage method:`, errorMessage);
-            console.error(`[Flipkart Sorted PDF] Error details:`, {
-              errorType: drawError instanceof Error ? drawError.constructor.name : typeof drawError,
-              errorMessage,
-              stack: drawError instanceof Error ? drawError.stack : undefined,
-              pageDimensions: { originalWidth, originalHeight },
-              cropDimensions: { cropX0, cropY0, cropWidth, cropHeight }
-            });
-            
-            // Fallback: Add full page without cropping
-            try {
-              console.warn(`[Flipkart Sorted PDF] Attempting fallback to full page for page ${idx + 1}`);
-              const [copiedPage] = await sortedPdf.copyPages(sourcePdf, [pageInfo.pageNum]);
-              sortedPdf.addPage(copiedPage);
-              console.warn(`[Flipkart Sorted PDF] ✅ Using full page as fallback for page ${idx + 1}`);
-            } catch (fallbackError) {
-              const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-              console.error(`[Flipkart Sorted PDF] ❌ Fallback failed for page ${idx + 1}:`, fallbackMessage);
-              // Skip this page
-              continue;
-            }
-          }
-
-          // Store highlighting info for pages that need it
-          if (shouldHighlight) {
-            const sortedPageIdx = sortedPdf.getPageCount() - 1;
-            highlightingInfo.push({
-              pageIndex: sortedPageIdx,
-              products,
-              totalQty,
-              hasDuplicates
-            });
-          }
-        } else {
-          // Use original page directly (fallback when cropping failed)
-          const [copiedPage] = await sortedPdf.copyPages(sourcePdf, [pageInfo.pageNum]);
-          sortedPdf.addPage(copiedPage);
-          console.debug(`[Flipkart Sorted PDF] Added full page ${idx + 1} (no cropping)`);
-
-          // Store highlighting info if needed
-          if (shouldHighlight) {
-            const sortedPageIdx = sortedPdf.getPageCount() - 1;
-            highlightingInfo.push({
-              pageIndex: sortedPageIdx,
-              products,
-              totalQty,
-              hasDuplicates
-            });
-          }
-        }
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        console.error(`[Flipkart Sorted PDF] ❌ Error inserting page ${idx + 1}:`, errorMessage);
-        console.error(`[Flipkart Sorted PDF] Page insertion error details:`, {
-          pageIndex: idx + 1,
-          totalPages: pageDataList.length,
-          pageInfo: {
-            pageNum: pageInfo.pageNum,
-            useCropped: pageInfo.useCropped,
-            productName: pageInfo.productName,
-            skuId: pageInfo.skuId,
-            hasCropDimensions: !!pageInfo.cropDimensions
-          },
-          errorType: error instanceof Error ? error.constructor.name : typeof error,
-          stack: error instanceof Error ? error.stack : undefined
-        });
-        continue;
-      }
-    }
-
-    const finalPageCount = sortedPdf.getPageCount();
-    console.log(`[Flipkart Sorted PDF] Sorted PDF created with ${finalPageCount} pages`);
-
-    // Validate that PDF has pages before proceeding
-    if (finalPageCount === 0) {
-      console.error('[Flipkart Sorted PDF] ❌ Sorted PDF has no pages - cannot save empty PDF');
-      console.error('[Flipkart Sorted PDF] Debug info:', {
-        totalPdfFiles: allPdfBytes.length,
-        pageDataListLength: pageDataList.length,
-        pdfSizes: allPdfBytes.map((b, i) => ({ index: i, size: b.length }))
-      });
-      return null;
-    }
-
-    // SECOND PASS: Apply highlighting to pages in sortedPdf
-    if (highlightingInfo.length > 0) {
-      console.log(`[Flipkart Sorted PDF] 🎨 SECOND PASS: Applying highlights to ${highlightingInfo.length} pages in sorted PDF...`);
-      
-      for (let idx = 0; idx < highlightingInfo.length; idx++) {
-        const highlightData = highlightingInfo[idx];
-        const { pageIndex, products, totalQty, hasDuplicates } = highlightData;
-
-        console.log(`[Flipkart Sorted PDF] 📄 Processing page ${idx + 1}/${highlightingInfo.length}: sorted_pdf index ${pageIndex}`);
-
+      for (let pageNum = 0; pageNum < totalPages; pageNum++) {
         try {
-          if (pageIndex < sortedPdf.getPageCount()) {
-            const sortedPage = sortedPdf.getPage(pageIndex);
-            console.log(`[Flipkart Sorted PDF] 🎨 Calling highlightLargeQtyFlipkart() for sorted_pdf page ${pageIndex + 1}...`);
+          const originalPage = sourcePdf.getPage(pageNum);
+          const { width: pageWidth, height: pageHeight } = originalPage.getSize();
+          const cropDimensions = getCropDimensions(pageWidth, pageHeight);
 
-            const highlightCount = await highlightLargeQtyFlipkart(sortedPage, products, totalQty);
+          // Extract text to check qty
+          let totalQty = 1;
+          let products: ShippingLabelProduct[] = [];
+          try {
+            const pdfjsPage = await pdfjsDoc.getPage(pageNum + 1);
+            const textContent = await pdfjsPage.getTextContent();
+            const pageText = smartJoinTextItems(textContent.items);
+            products = extractProductFromShippingLabel(pageText);
+            totalQty = products.reduce((sum, p) => sum + p.qty, 0);
+          } catch {
+            // continue without highlight info
+          }
 
-            const qtyReason = totalQty > 1 
-              ? `total_qty=${totalQty}` 
-              : hasDuplicates 
-                ? 'duplicate products' 
-                : products.length > 1 
-                  ? `multiple products (${products.length} products)` 
-                  : 'unknown';
+          const shouldHighlight = totalQty > 1 || products.length > 1;
 
-            if (highlightCount > 0) {
-              console.log(`[Flipkart Sorted PDF] ✅ SUCCESS: Highlighted sorted_pdf page ${pageIndex + 1} with ${qtyReason} (${highlightCount} blocks highlighted)`);
-            } else {
-              console.warn(`[Flipkart Sorted PDF] ⚠️  WARNING: Highlight function returned 0 blocks for sorted_pdf page ${pageIndex + 1} (qty_reason: ${qtyReason})`);
+          if (cropDimensions) {
+            const { cropX0, cropY0, cropWidth, cropHeight } = cropDimensions;
+            const xOffset = -cropX0;
+            const yOffset = -(pageHeight - cropY0 - cropHeight);
+
+            const embeddedPage = await outputPdf.embedPage(originalPage);
+            const newPage = outputPdf.addPage([cropWidth, cropHeight]);
+            newPage.drawPage(embeddedPage, { x: xOffset, y: yOffset, xScale: 1, yScale: 1 });
+
+            if (shouldHighlight) {
+              await highlightLargeQtyFlipkart(newPage, products, totalQty);
             }
           } else {
-            console.error(`[Flipkart Sorted PDF] ❌ ERROR: Page index ${pageIndex} out of range for sorted_pdf (length: ${sortedPdf.getPageCount()})`);
+            // Fallback: full page
+            const [copiedPage] = await outputPdf.copyPages(sourcePdf, [pageNum]);
+            outputPdf.addPage(copiedPage);
+            if (shouldHighlight) {
+              await highlightLargeQtyFlipkart(outputPdf.getPage(outputPdf.getPageCount() - 1), products, totalQty);
+            }
           }
-        } catch (error) {
-          console.error(`[Flipkart Sorted PDF] ❌ ERROR: Could not highlight sorted_pdf page ${pageIndex + 1}:`, error);
+        } catch (pageErr) {
+          console.error(`[Flipkart PDF] Error on page ${pageNum + 1}:`, pageErr);
         }
       }
-
-      console.log(`[Flipkart Sorted PDF] 🎨 SECOND PASS COMPLETE: Finished processing ${highlightingInfo.length} pages`);
-    } else {
-      console.log('[Flipkart Sorted PDF] ⏭️  No pages require highlighting (all pages have qty <= 1 and only 1 product each)');
     }
 
-    // Save to bytes
-    console.log('[Flipkart Sorted PDF] Saving sorted PDF to buffer...');
-    
-    // Validate page count one more time before saving
-    const pageCountBeforeSave = sortedPdf.getPageCount();
-    if (pageCountBeforeSave === 0) {
-      console.error('[Flipkart Sorted PDF] ❌ PDF has no pages - cannot save empty PDF');
+    const pageCount = outputPdf.getPageCount();
+    if (pageCount === 0) {
+      console.error('[Flipkart PDF] No pages in output PDF');
       return null;
     }
-    
-    const pdfBytes = await sortedPdf.save();
-    const bufferSize = pdfBytes.length;
-    
-    if (bufferSize === 0) {
-      console.error('[Flipkart Sorted PDF] ❌ Saved PDF is empty (0 bytes)');
-      return null;
-    }
-    
-    // Validate PDF header to ensure it's a valid PDF
-    const pdfHeader = new TextDecoder().decode(pdfBytes.slice(0, 4));
-    if (!pdfHeader.startsWith('%PDF')) {
-      console.error(`[Flipkart Sorted PDF] ❌ Saved PDF has invalid header: "${pdfHeader}" (expected "%PDF")`);
-      return null;
-    }
-    
-    console.log(`[Flipkart Sorted PDF] ✅ Sorted PDF saved: ${pageCountBeforeSave} pages, ${bufferSize} bytes (${(bufferSize / 1024 / 1024).toFixed(2)} MB)`);
-    console.log(`[Flipkart Sorted PDF] ✅ Successfully sorted ${pageDataList.length} shipping labels by product`);
 
+    const pdfBytes = await outputPdf.save();
+    console.log(`[Flipkart PDF] ✅ Done: ${pageCount} pages, ${pdfBytes.length} bytes`);
     return new Uint8Array(pdfBytes);
   } catch (error) {
-    console.error('[Flipkart Sorted PDF] ❌ Error sorting PDF by SKU:', error);
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error('[Flipkart Sorted PDF] Error details:', {
-      errorType: error instanceof Error ? error.constructor.name : typeof error,
-      errorMessage,
-      stack: error instanceof Error ? error.stack : undefined
-    });
+    console.error('[Flipkart PDF] ❌ Error:', error);
     return null;
   }
 };

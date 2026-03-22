@@ -1,12 +1,14 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useState } from 'react';
 import { MasterProduct, NutritionData } from '../../types';
 import ProductSelector from '../ProductSelector';
 import LabelCard from '../LabelCard';
+import { useAdmin } from '../../contexts/AdminContext';
 import { AlertCircle, Package } from 'lucide-react';
 import {
   generateMRPLabel,
   generateBarcodeLabel,
   generateCombinedLabelHorizontal,
+  generateCombinedVerticalSticker,
   generateTripleLabel
 } from '../../services/pdfGenerator';
 import { create4x6VerticalFromSingleLabel } from '../../services/labelFormatter';
@@ -40,6 +42,8 @@ const LabelGeneratorView: React.FC<LabelGeneratorViewProps> = ({
   setGeneratingLabel,
 }) => {
   const { showSuccess, showError } = useToast();
+  const { flags } = useAdmin();
+  const [printingLabel, setPrintingLabel] = useState<string | null>(null);
 
   const getSelectedProductData = useCallback(() => {
     return masterData.find(
@@ -55,7 +59,8 @@ const LabelGeneratorView: React.FC<LabelGeneratorViewProps> = ({
       
       const result = await Promise.resolve(generatorFn());
       const product = getSelectedProductData();
-      const filename = `${product?.Name?.replace(/[^a-z0-9]/gi, '_')}_${type}.pdf`;
+      const weight = product?.['Net Weight']?.replace(/[^a-z0-9]/gi, '_') ?? '';
+      const filename = `${product?.Name?.replace(/[^a-z0-9]/gi, '_')}${weight ? `_${weight}kg` : ''}_${type}.pdf`;
       
       // Handle both jsPDF and Uint8Array results
       if (result instanceof Uint8Array) {
@@ -80,6 +85,32 @@ const LabelGeneratorView: React.FC<LabelGeneratorViewProps> = ({
       showError('Generation failed', `Error generating ${type} label`);
     } finally {
       setGeneratingLabel(null);
+    }
+  };
+
+  const handlePrint = async (type: string, generatorFn: () => any | Promise<any>) => {
+    setPrintingLabel(type);
+    try {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const result = await Promise.resolve(generatorFn());
+
+      const pdfBytes: Uint8Array = result instanceof Uint8Array
+        ? result
+        : new Uint8Array(result.output('arraybuffer'));
+
+      const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const printWindow = window.open(url, '_blank');
+      if (printWindow) {
+        printWindow.onload = () => { try { printWindow.print(); } catch (_) {} };
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      showSuccess('Ready to print', `${type} label opened — use the browser print dialog`);
+    } catch (e) {
+      console.error(e);
+      showError('Print failed', `Error preparing ${type} label for printing`);
+    } finally {
+      setPrintingLabel(null);
     }
   };
 
@@ -118,12 +149,14 @@ const LabelGeneratorView: React.FC<LabelGeneratorViewProps> = ({
           ))}
         </div>
       ) : selectedProduct ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 animate-fadeIn">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6 animate-fadeIn">
           <LabelCard
             title="MRP Label"
             description="Standard 48x25mm label with MRP, Dates, and Batch Code."
             isLoading={generatingLabel === 'mrp'}
+            isPrinting={printingLabel === 'mrp'}
             onDownload={() => handleDownload('mrp', () => generateMRPLabel(selectedProduct))}
+            onPrint={() => handlePrint('mrp', () => generateMRPLabel(selectedProduct))}
           />
 
           <LabelCard
@@ -131,7 +164,9 @@ const LabelGeneratorView: React.FC<LabelGeneratorViewProps> = ({
             description="Standard 48x25mm FNSKU barcode label."
             isDisabled={!hasFnsku}
             isLoading={generatingLabel === 'barcode'}
+            isPrinting={printingLabel === 'barcode'}
             onDownload={() => handleDownload('barcode', () => generateBarcodeLabel(selectedProduct.FNSKU!))}
+            onPrint={() => handlePrint('barcode', () => generateBarcodeLabel(selectedProduct.FNSKU!))}
           />
 
           <LabelCard
@@ -139,7 +174,19 @@ const LabelGeneratorView: React.FC<LabelGeneratorViewProps> = ({
             description="Horizontal 96x25mm label combining MRP details and Barcode side-by-side."
             isDisabled={!hasFnsku}
             isLoading={generatingLabel === 'combined'}
+            isPrinting={printingLabel === 'combined'}
             onDownload={() => handleDownload('combined', () => generateCombinedLabelHorizontal(selectedProduct))}
+            onPrint={() => handlePrint('combined', () => generateCombinedLabelHorizontal(selectedProduct))}
+          />
+
+          <LabelCard
+            title="Combined Vertical Sticker"
+            description="2-page PDF: Page 1 — MRP label (50×25mm), Page 2 — FNSKU Barcode (50×25mm)."
+            isDisabled={!hasFnsku}
+            isLoading={generatingLabel === 'combined_vertical'}
+            isPrinting={printingLabel === 'combined_vertical'}
+            onDownload={() => handleDownload('combined_vertical', () => generateCombinedVerticalSticker(selectedProduct))}
+            onPrint={() => handlePrint('combined_vertical', () => generateCombinedVerticalSticker(selectedProduct))}
           />
 
           <LabelCard
@@ -147,9 +194,15 @@ const LabelGeneratorView: React.FC<LabelGeneratorViewProps> = ({
             description="Vertical 50x100mm House label with Ingredients, Nutrition, and MRP/Barcode."
             isDisabled={!canGenerateTriple}
             isLoading={generatingLabel === 'triple'}
+            isPrinting={printingLabel === 'triple'}
             onDownload={async () => {
               if(nutritionRow) {
                 await handleDownload('triple', async () => await generateTripleLabel(selectedProduct, nutritionRow));
+              }
+            }}
+            onPrint={async () => {
+              if(nutritionRow) {
+                await handlePrint('triple', async () => await generateTripleLabel(selectedProduct, nutritionRow));
               }
             }}
           />
@@ -164,23 +217,30 @@ const LabelGeneratorView: React.FC<LabelGeneratorViewProps> = ({
         )
       )}
       
-      {/* 4x6 Format Option - Only show when triple label can be generated */}
-      {!isLoadingData && selectedProduct && canGenerateTriple && (
-        <div className="mt-6">
+      {/* 4x6 Format Option - appended to main grid */}
+      {flags.show4x6Vertical && !isLoadingData && selectedProduct && canGenerateTriple && (
+        <div className="mt-0">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 animate-fadeIn">
             <LabelCard
               title="House in 4x6 inch (Vertical)"
               description="4×6 inch format with 3 copies of House label, rotated 90° and stacked vertically."
               isDisabled={!canGenerateTriple}
               isLoading={generatingLabel === 'house_4x6'}
+              isPrinting={printingLabel === 'house_4x6'}
               onDownload={async () => {
                 if(nutritionRow) {
                   await handleDownload('house_4x6', async () => {
-                    // Generate triple label first
                     const triplePdf = await generateTripleLabel(selectedProduct, nutritionRow);
-                    // Convert to Uint8Array
                     const tripleBytes = triplePdf.output('arraybuffer');
-                    // Convert to 4x6 format
+                    return create4x6VerticalFromSingleLabel(new Uint8Array(tripleBytes));
+                  });
+                }
+              }}
+              onPrint={async () => {
+                if(nutritionRow) {
+                  await handlePrint('house_4x6', async () => {
+                    const triplePdf = await generateTripleLabel(selectedProduct, nutritionRow);
+                    const tripleBytes = triplePdf.output('arraybuffer');
                     return create4x6VerticalFromSingleLabel(new Uint8Array(tripleBytes));
                   });
                 }

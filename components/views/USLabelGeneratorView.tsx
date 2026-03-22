@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { useAdmin } from '../../contexts/AdminContext';
 import { USProduct, NutritionData } from '../../types';
 import ProductSelector from '../ProductSelector';
 import LabelCard from '../LabelCard';
@@ -18,6 +19,7 @@ import SkeletonCard from '../SkeletonCard';
 
 const USLabelGeneratorView: React.FC = () => {
   const { showSuccess, showError } = useToast();
+  const { flags } = useAdmin();
 
   const [usMasterData, setUSMasterData] = useState<USProduct[]>([]);
   const [nutritionData, setNutritionData] = useState<NutritionData[]>([]);
@@ -26,30 +28,48 @@ const USLabelGeneratorView: React.FC = () => {
   const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [generatingLabel, setGeneratingLabel] = useState<string | null>(null);
+  const [printingLabel, setPrintingLabel] = useState<string | null>(null);
 
-  // Load data on mount
-  useEffect(() => {
-    const loadData = async () => {
-      setIsLoadingData(true);
+  const loadData = useCallback(async () => {
+    setIsLoadingData(true);
+    setError(null);
+    try {
+      const [usMasterResult, nutritionResult] = await Promise.all([
+        fetchUSMasterData(),
+        fetchNutritionData()
+      ]);
+      setUSMasterData(usMasterResult.data);
+      setNutritionData(nutritionResult.data);
       setError(null);
-      try {
-        const [usMaster, nutrition] = await Promise.all([
-          fetchUSMasterData(),
-          fetchNutritionData()
-        ]);
-        setUSMasterData(usMaster);
-        setNutritionData(nutrition);
-        setIsLoadingData(false);
-      } catch (err) {
-        console.error(err);
-        const errorMessage = err instanceof Error ? err.message : "Failed to load data from Google Sheets. Please check your connection and try again.";
-        setError(errorMessage);
-        setIsLoadingData(false);
-      }
-    };
-
-    loadData();
+      setIsLoadingData(false);
+    } catch (err) {
+      console.error(err);
+      const errorMessage = err instanceof Error ? err.message : "Failed to load data. No cached data available.";
+      setError(errorMessage);
+      setIsLoadingData(false);
+    }
   }, []);
+
+  // Initial load
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  // Auto-refresh every 5 minutes when online; re-fetch immediately on reconnect
+  useEffect(() => {
+    const INTERVAL_MS = 5 * 60 * 1000;
+    const interval = setInterval(() => {
+      if (navigator.onLine) loadData();
+    }, INTERVAL_MS);
+
+    const handleOnline = () => loadData();
+    window.addEventListener('online', handleOnline);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('online', handleOnline);
+    };
+  }, [loadData]);
 
   const getSelectedProductData = useCallback(() => {
     return usMasterData.find(
@@ -65,7 +85,8 @@ const USLabelGeneratorView: React.FC = () => {
 
       const result = await Promise.resolve(generatorFn());
       const product = getSelectedProductData();
-      const filename = `${product?.Name?.replace(/[^a-z0-9]/gi, '_')}_US_${type}.pdf`;
+      const weight = product?.['Net Weight']?.replace(/[^a-z0-9]/gi, '_') ?? '';
+      const filename = `${product?.Name?.replace(/[^a-z0-9]/gi, '_')}${weight ? `_${weight}kg` : ''}_US_${type}.pdf`;
 
       // Handle both jsPDF and Uint8Array results
       if (result instanceof Uint8Array) {
@@ -90,6 +111,32 @@ const USLabelGeneratorView: React.FC = () => {
       showError('Generation failed', `Error generating ${type} label`);
     } finally {
       setGeneratingLabel(null);
+    }
+  };
+
+  const handlePrint = async (type: string, generatorFn: () => any | Promise<any>) => {
+    setPrintingLabel(type);
+    try {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const result = await Promise.resolve(generatorFn());
+
+      const pdfBytes: Uint8Array = result instanceof Uint8Array
+        ? result
+        : new Uint8Array(result.output('arraybuffer'));
+
+      const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const printWindow = window.open(url, '_blank');
+      if (printWindow) {
+        printWindow.onload = () => { try { printWindow.print(); } catch (_) {} };
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      showSuccess('Ready to print', `${type} label opened — use the browser print dialog`);
+    } catch (e) {
+      console.error(e);
+      showError('Print failed', `Error preparing ${type} label for printing`);
+    } finally {
+      setPrintingLabel(null);
     }
   };
 
@@ -145,7 +192,9 @@ const USLabelGeneratorView: React.FC = () => {
             title="US Label 1"
             description="Standard 48x25mm label with Net Weight (kg+oz), M.F.G on, U.S.E By, Batch Code, and FDA Reg. No."
             isLoading={generatingLabel === 'label1'}
+            isPrinting={printingLabel === 'label1'}
             onDownload={() => handleDownload('label1', () => generateUSLabel1(selectedProduct))}
+            onPrint={() => handlePrint('label1', () => generateUSLabel1(selectedProduct))}
           />
 
           <LabelCard
@@ -153,7 +202,9 @@ const USLabelGeneratorView: React.FC = () => {
             description="Standard 48x25mm FNSKU barcode label."
             isDisabled={!hasFnsku}
             isLoading={generatingLabel === 'barcode'}
+            isPrinting={printingLabel === 'barcode'}
             onDownload={() => handleDownload('barcode', () => generateBarcodeLabel(selectedProduct.FNSKU!))}
+            onPrint={() => handlePrint('barcode', () => generateBarcodeLabel(selectedProduct.FNSKU!))}
           />
 
           <LabelCard
@@ -161,7 +212,9 @@ const USLabelGeneratorView: React.FC = () => {
             description="Horizontal 96x25mm label combining Label 1 and FNSKU Barcode side-by-side."
             isDisabled={!hasFnsku}
             isLoading={generatingLabel === 'combined'}
+            isPrinting={printingLabel === 'combined'}
             onDownload={() => handleDownload('combined', () => generateUSCombinedLabel(selectedProduct))}
+            onPrint={() => handlePrint('combined', () => generateUSCombinedLabel(selectedProduct))}
           />
 
           <LabelCard
@@ -169,9 +222,15 @@ const USLabelGeneratorView: React.FC = () => {
             description="Vertical 50x100mm House label with Name, Ingredients, Allergen Info, Nutritional Info, Label 1, and FNSKU Label."
             isDisabled={!canGenerateTriple}
             isLoading={generatingLabel === 'triple'}
+            isPrinting={printingLabel === 'triple'}
             onDownload={async () => {
               if (nutritionRow) {
                 await handleDownload('triple', async () => await generateUSTripleLabel(selectedProduct, nutritionRow));
+              }
+            }}
+            onPrint={async () => {
+              if (nutritionRow) {
+                await handlePrint('triple', async () => await generateUSTripleLabel(selectedProduct, nutritionRow));
               }
             }}
           />
@@ -190,32 +249,47 @@ const USLabelGeneratorView: React.FC = () => {
       {!isLoadingData && selectedProduct && canGenerateTriple && (
         <div className="mt-6">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 animate-fadeIn">
-            <LabelCard
-              title="House in 4x6 inch (Vertical)"
-              description="4×6 inch format with 3 copies of House label, rotated 90° and stacked vertically."
-              isDisabled={!canGenerateTriple}
-              isLoading={generatingLabel === 'house_4x6'}
-              onDownload={async () => {
-                if (nutritionRow) {
-                  await handleDownload('house_4x6', async () => {
-                    // Generate triple label first
-                    const triplePdf = await generateUSTripleLabel(selectedProduct, nutritionRow);
-                    // Convert to Uint8Array
-                    const tripleBytes = triplePdf.output('arraybuffer');
-                    // Convert to 4x6 format
-                    return create4x6VerticalFromSingleLabel(new Uint8Array(tripleBytes));
-                  });
-                }
-              }}
-            />
+            {flags.show4x6Vertical && (
+              <LabelCard
+                title="House in 4x6 inch (Vertical)"
+                description="4×6 inch format with 3 copies of House label, rotated 90° and stacked vertically."
+                isDisabled={!canGenerateTriple}
+                isLoading={generatingLabel === 'house_4x6'}
+                isPrinting={printingLabel === 'house_4x6'}
+                onDownload={async () => {
+                  if (nutritionRow) {
+                    await handleDownload('house_4x6', async () => {
+                      const triplePdf = await generateUSTripleLabel(selectedProduct, nutritionRow);
+                      const tripleBytes = triplePdf.output('arraybuffer');
+                      return create4x6VerticalFromSingleLabel(new Uint8Array(tripleBytes));
+                    });
+                  }
+                }}
+                onPrint={async () => {
+                  if (nutritionRow) {
+                    await handlePrint('house_4x6', async () => {
+                      const triplePdf = await generateUSTripleLabel(selectedProduct, nutritionRow);
+                      const tripleBytes = triplePdf.output('arraybuffer');
+                      return create4x6VerticalFromSingleLabel(new Uint8Array(tripleBytes));
+                    });
+                  }
+                }}
+              />
+            )}
             <LabelCard
               title="Triple Label (100×150mm)"
               description="Large 100×150mm House label — same content as Triple Label but printed at full-size scale."
               isDisabled={!canGenerateTriple}
               isLoading={generatingLabel === 'triple_large'}
+              isPrinting={printingLabel === 'triple_large'}
               onDownload={async () => {
                 if (nutritionRow) {
                   await handleDownload('triple_large', async () => await generateUSTripleLargeLabel(selectedProduct, nutritionRow));
+                }
+              }}
+              onPrint={async () => {
+                if (nutritionRow) {
+                  await handlePrint('triple_large', async () => await generateUSTripleLargeLabel(selectedProduct, nutritionRow));
                 }
               }}
             />

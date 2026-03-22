@@ -8,6 +8,22 @@ export default {
   ],
   theme: {
     extend: {
+      colors: {
+        // Shift gray text shades darker across the board
+        gray: {
+          50:  '#f9fafb',
+          100: '#f3f4f6',
+          200: '#e5e7eb',
+          300: '#d1d5db',
+          400: '#6b7280', // was #9ca3af — bumped darker
+          500: '#4b5563', // was #6b7280 — bumped darker
+          600: '#374151', // was #4b5563 — bumped darker
+          700: '#1f2937', // was #374151 — bumped darker
+          800: '#111827', // was #1f2937
+          900: '#030712', // was #111827
+          950: '#030712',
+        },
+      },
       keyframes: {
         fadeIn: {
           '0%': { opacity: '0' },

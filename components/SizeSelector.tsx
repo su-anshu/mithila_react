@@ -21,11 +21,11 @@ const sizeInfo: Record<LabelSize, { label: string; dimensions: string; descripti
     description: 'Wide horizontal label (2 labels per page)',
     isVertical: false
   },
-  '50x100mm': {
-    label: '50×100mm',
-    dimensions: '50×100mm',
-    description: 'Vertical label',
-    isVertical: true
+  '150x100mm': {
+    label: '150×100mm',
+    dimensions: '150×100mm',
+    description: 'Large horizontal label',
+    isVertical: false
   },
   '100x50mm': {
     label: '100×50mm',

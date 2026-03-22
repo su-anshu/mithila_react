@@ -3,7 +3,7 @@ import { PDFDocument } from 'pdf-lib';
 import { format } from 'date-fns';
 import { COMBINED_WIDTH, COMBINED_HEIGHT, LABEL_WIDTH, LABEL_HEIGHT, MM_TO_PT } from '../constants';
 
-export type LabelSize = '48x25mm' | '96x25mm' | '50x100mm' | '100x50mm';
+export type LabelSize = '48x25mm' | '96x25mm' | '50x25mm' | '150x100mm' | '100x50mm';
 
 /**
  * Wrap text to fit within width
@@ -57,7 +57,8 @@ const drawSingleLabel = (
   widthMm: number,
   heightMm: number,
   xOffsetMm: number,
-  includeDate: boolean
+  includeDate: boolean,
+  fontSizeMultiplier: number = 1
 ): void => {
   const isVertical = heightMm > widthMm;
   const currentDate = format(new Date(), 'dd/MM/yyyy');
@@ -68,8 +69,8 @@ const drawSingleLabel = (
     const scaleFactor = heightMm / baseHeightMm;
     
     // Font sizes are in points (standard)
-    const productFontSize = Math.max(14, Math.floor(20 * scaleFactor));
-    const dateFontSize = Math.max(10, Math.floor(14 * scaleFactor));
+    const productFontSize = Math.max(14, Math.floor(20 * scaleFactor * fontSizeMultiplier));
+    const dateFontSize = Math.max(10, Math.floor(14 * scaleFactor * fontSizeMultiplier));
     
     // Line heights in points, convert to mm for positioning
     const lineHeightPt = productFontSize * 1.2;
@@ -147,8 +148,8 @@ const drawSingleLabel = (
     const scaleFactor = widthMm / baseWidthMm;
     
     // Font sizes are in points (standard)
-    const productFontSize = Math.max(12, Math.floor(16 * scaleFactor));
-    const dateFontSize = Math.max(8, Math.floor(12 * scaleFactor));
+    const productFontSize = Math.max(12, Math.floor(16 * scaleFactor * fontSizeMultiplier));
+    const dateFontSize = Math.max(8, Math.floor(12 * scaleFactor * fontSizeMultiplier));
     
     // Line heights in points, convert to mm for positioning
     const lineHeightPt = productFontSize * 1.2;
@@ -230,7 +231,8 @@ const drawSingleLabel = (
 export const createLabelPdf = (
   productName: string,
   labelSize: LabelSize,
-  includeDate: boolean = true
+  includeDate: boolean = true,
+  fontSizeMultiplier: number = 1
 ): jsPDF => {
   let doc: jsPDF;
   let widthMm: number;
@@ -244,7 +246,7 @@ export const createLabelPdf = (
       unit: 'mm',
       format: [48, 25]
     });
-    drawSingleLabel(doc, productName, widthMm, heightMm, 0, includeDate);
+    drawSingleLabel(doc, productName, widthMm, heightMm, 0, includeDate, fontSizeMultiplier);
   } else if (labelSize === '96x25mm') {
     widthMm = 96;
     heightMm = 25;
@@ -255,17 +257,26 @@ export const createLabelPdf = (
     });
     // Draw two identical labels side by side
     const labelWidthMm = 48;
-    drawSingleLabel(doc, productName, labelWidthMm, heightMm, 0, includeDate);
-    drawSingleLabel(doc, productName, labelWidthMm, heightMm, labelWidthMm, includeDate);
-  } else if (labelSize === '50x100mm') {
+    drawSingleLabel(doc, productName, labelWidthMm, heightMm, 0, includeDate, fontSizeMultiplier);
+    drawSingleLabel(doc, productName, labelWidthMm, heightMm, labelWidthMm, includeDate, fontSizeMultiplier);
+  } else if (labelSize === '50x25mm') {
     widthMm = 50;
+    heightMm = 25;
+    doc = new jsPDF({
+      orientation: 'landscape',
+      unit: 'mm',
+      format: [50, 25]
+    });
+    drawSingleLabel(doc, productName, widthMm, heightMm, 0, includeDate, fontSizeMultiplier);
+  } else if (labelSize === '150x100mm') {
+    widthMm = 150;
     heightMm = 100;
     doc = new jsPDF({
-      orientation: 'portrait',
+      orientation: 'landscape',
       unit: 'mm',
-      format: [50, 100]
+      format: [150, 100]
     });
-    drawSingleLabel(doc, productName, widthMm, heightMm, 0, includeDate);
+    drawSingleLabel(doc, productName, widthMm, heightMm, 0, includeDate, fontSizeMultiplier);
   } else if (labelSize === '100x50mm') {
     widthMm = 100;
     heightMm = 50;
@@ -274,7 +285,7 @@ export const createLabelPdf = (
       unit: 'mm',
       format: [100, 50]
     });
-    drawSingleLabel(doc, productName, widthMm, heightMm, 0, includeDate);
+    drawSingleLabel(doc, productName, widthMm, heightMm, 0, includeDate, fontSizeMultiplier);
   } else {
     // Default to 48x25mm
     widthMm = 48;
@@ -284,7 +295,7 @@ export const createLabelPdf = (
       unit: 'mm',
       format: [48, 25]
     });
-    drawSingleLabel(doc, productName, widthMm, heightMm, 0, includeDate);
+    drawSingleLabel(doc, productName, widthMm, heightMm, 0, includeDate, fontSizeMultiplier);
   }
   
   return doc;
@@ -345,7 +356,8 @@ export const createPairLabelPdf = (
  */
 export const generateProductLabelsPdf = async (
   productNames: string[],
-  includeDate: boolean = false
+  includeDate: boolean = false,
+  size: '96x25mm' | '50x25mm' = '96x25mm'
 ): Promise<Uint8Array | null> => {
   if (productNames.length === 0) {
     return null;
@@ -354,14 +366,22 @@ export const generateProductLabelsPdf = async (
   const combinedPdf = await PDFDocument.create();
   const labelPages: jsPDF[] = [];
 
-  // Generate individual pair label pages
-  for (let i = 0; i < productNames.length; i += 2) {
-    const product1 = productNames[i] || null;
-    const product2 = i + 1 < productNames.length ? productNames[i + 1] : null;
-    
-    const pairLabel = createPairLabelPdf(product1, product2, includeDate);
-    if (pairLabel) {
-      labelPages.push(pairLabel);
+  if (size === '50x25mm') {
+    // 1 label per page at 50x25mm
+    for (const productName of productNames) {
+      const label = createLabelPdf(productName, '50x25mm', includeDate);
+      labelPages.push(label);
+    }
+  } else {
+    // 2 labels per page at 96x25mm (pair)
+    for (let i = 0; i < productNames.length; i += 2) {
+      const product1 = productNames[i] || null;
+      const product2 = i + 1 < productNames.length ? productNames[i + 1] : null;
+
+      const pairLabel = createPairLabelPdf(product1, product2, includeDate);
+      if (pairLabel) {
+        labelPages.push(pairLabel);
+      }
     }
   }
 

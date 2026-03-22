@@ -1,5 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { Upload, FileText, Download, AlertCircle, Package, Loader2, X } from 'lucide-react';
+import DownloadButton from '../../components/DownloadButton';
 import { MasterProduct, PhysicalItem, OrderItem } from '../../types';
 import { processManualPlanFile, processManualPlanItem, ProcessedManualPlan, ManualPlanItemBlock } from '../../services/manualPackingPlanProcessor';
 import { generateManualPlanPdf } from '../../services/manualPlanPdfGenerator';
@@ -375,20 +376,22 @@ const ManualPackingPlanView: React.FC<ManualPackingPlanViewProps> = ({ masterDat
           </div>
 
           <div className="flex space-x-4">
-            <button
-              onClick={handleDownloadPdf}
+            <DownloadButton
+              onDownload={handleDownloadPdf}
+              tickSize="h-5 w-5"
               className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 flex items-center"
             >
               <Download className="w-5 h-5 mr-2" />
               Download PDF
-            </button>
-            <button
-              onClick={handleDownloadExcel}
+            </DownloadButton>
+            <DownloadButton
+              onDownload={handleDownloadExcel}
+              tickSize="h-5 w-5"
               className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 flex items-center"
             >
               <Download className="w-5 h-5 mr-2" />
               Download Excel
-            </button>
+            </DownloadButton>
           </div>
         </div>
       )}

@@ -1,10 +1,11 @@
 import React, { useState, useCallback, useMemo } from 'react';
-import { Upload, FileText, Download, Tag, AlertCircle, Package, Loader2, X, ShoppingCart, Box, CheckCircle, FileSpreadsheet, Sparkles, Info, ChevronDown, ChevronUp } from 'lucide-react';
+import { useAdmin } from '../../contexts/AdminContext';
+import { Upload, FileText, Download, Tag, AlertCircle, Package, Loader2, X, CheckCircle, Info, ChevronDown, ChevronUp } from 'lucide-react';
 import { MasterProduct, NutritionData, OrderItem, PhysicalItem, MissingProduct, ProcessingStats, PDFDiagnostics } from '../../types';
 import { processPdfInvoices, validatePdfFile } from '../../services/pdfProcessor';
 import { expandToPhysical, createASINLookupDict } from '../../services/packingPlanProcessor';
 import { generateSummaryPdf } from '../../services/packingPlanPdfGenerator';
-import { generateLabelsByPacketUsed, generateMRPOnlyLabels } from '../../services/packingPlanLabelGenerator';
+import { generateLabelsByPacketUsed, generateMRPOnlyLabels, generateCombinedVerticalLabels } from '../../services/packingPlanLabelGenerator';
 import { generateProductLabelsPdf } from '../../services/productLabelGenerator';
 import { shouldIncludeProductLabel } from '../../services/utils';
 import { reformatLabelsTo4x6Vertical } from '../../services/labelFormatter';
@@ -20,6 +21,8 @@ import FileUploadZone from '../../components/FileUploadZone';
 import SearchableTable from '../../components/SearchableTable';
 import StatCard from '../../components/StatCard';
 import ExtractionDiagnostics from '../../components/ExtractionDiagnostics';
+import BrandWiseLabels from '../../components/BrandWiseLabels';
+import DownloadButton from '../../components/DownloadButton';
 
 /**
  * Generate hash from physical items data for caching
@@ -59,6 +62,7 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
   const [isLoadingData] = useState(false);
   const { showSuccess, showError, showInfo } = useToast();
   const confirm = useConfirm();
+  const { flags } = useAdmin();
   
   const [pdfFiles, setPdfFiles] = useState<File[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -107,7 +111,7 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
       
       // Product labels state
       const [productLabelPdfBytes, setProductLabelPdfBytes] = useState<Uint8Array | null>(null);
-      const [productLabelPdfBytesWithDate, setProductLabelPdfBytesWithDate] = useState<Uint8Array | null>(null);
+      const [productLabel50x25PdfBytes, setProductLabel50x25PdfBytes] = useState<Uint8Array | null>(null);
       const [productLabelCount, setProductLabelCount] = useState(0);
       const [isGeneratingProductLabels, setIsGeneratingProductLabels] = useState(false);
       
@@ -115,7 +119,14 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
       const [mrpPdfBytes, setMrpPdfBytes] = useState<Uint8Array | null>(null);
       const [mrpCount, setMrpCount] = useState(0);
       const [isGeneratingMrpLabels, setIsGeneratingMrpLabels] = useState(false);
-      
+
+      // Combined Vertical Sticker labels state
+      const [combinedVerticalPdfBytes, setCombinedVerticalPdfBytes] = useState<Uint8Array | null>(null);
+      const [combinedVerticalCount, setCombinedVerticalCount] = useState(0);
+      const [isGeneratingCombinedVertical, setIsGeneratingCombinedVertical] = useState(false);
+      const [cachedCombinedVerticalPdfBytes, setCachedCombinedVerticalPdfBytes] = useState<Uint8Array | null>(null);
+      const [cachedCombinedVerticalCount, setCachedCombinedVerticalCount] = useState(0);
+
       // Label caching state
       const [labelCacheHash, setLabelCacheHash] = useState<string | null>(null);
       const [cachedStickerPdfBytes, setCachedStickerPdfBytes] = useState<Uint8Array | null>(null);
@@ -126,7 +137,7 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
       const [cachedHouse4x6VerticalCount, setCachedHouse4x6VerticalCount] = useState(0);
       const [cachedSkippedProducts, setCachedSkippedProducts] = useState<Array<{ Product: string; ASIN: string; 'Packet used': string; Reason: string }>>([]);
       const [cachedProductLabelPdfBytes, setCachedProductLabelPdfBytes] = useState<Uint8Array | null>(null);
-      const [cachedProductLabelPdfBytesWithDate, setCachedProductLabelPdfBytesWithDate] = useState<Uint8Array | null>(null);
+      const [cachedProductLabel50x25PdfBytes, setCachedProductLabel50x25PdfBytes] = useState<Uint8Array | null>(null);
       const [cachedProductLabelCount, setCachedProductLabelCount] = useState(0);
       const [cachedMrpPdfBytes, setCachedMrpPdfBytes] = useState<Uint8Array | null>(null);
       const [cachedMrpCount, setCachedMrpCount] = useState(0);
@@ -364,10 +375,14 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
       setCachedHouseCount(0);
       setCachedSkippedProducts([]);
       setCachedProductLabelPdfBytes(null);
-      setCachedProductLabelPdfBytesWithDate(null);
+      setCachedProductLabel50x25PdfBytes(null);
       setCachedProductLabelCount(0);
       setCachedMrpPdfBytes(null);
       setCachedMrpCount(0);
+      setCachedCombinedVerticalPdfBytes(null);
+      setCachedCombinedVerticalCount(0);
+      setCombinedVerticalPdfBytes(null);
+      setCombinedVerticalCount(0);
 
       // Calculate statistics
       // Note: totalQtyOrdered and totalQtyPhysical are already calculated above
@@ -567,11 +582,10 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
     }
     
     // Check if product labels are already cached for this data
-    const productLabelCacheKey = `product_label_${currentDataHash}`;
     if (labelCacheHash === currentDataHash && cachedProductLabelPdfBytes) {
       console.log('[Label Caching] Using cached product labels. Hash:', currentDataHash.substring(0, 8));
       setProductLabelPdfBytes(cachedProductLabelPdfBytes);
-      setProductLabelPdfBytesWithDate(cachedProductLabelPdfBytesWithDate);
+      setProductLabel50x25PdfBytes(cachedProductLabel50x25PdfBytes);
       setProductLabelCount(cachedProductLabelCount);
       return;
     }
@@ -602,18 +616,18 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
         return;
       }
       
-      // Generate product labels (both with and without date)
-      const productPdfWithoutDate = await generateProductLabelsPdf(productList, false);
-      const productPdfWithDate = await generateProductLabelsPdf(productList, true);
-      
+      // Generate product labels (96x25mm and 50x25mm, no date)
+      const productPdf96x25 = await generateProductLabelsPdf(productList, false, '96x25mm');
+      const productPdf50x25 = await generateProductLabelsPdf(productList, false, '50x25mm');
+
       // Cache the results
-      setCachedProductLabelPdfBytes(productPdfWithoutDate);
-      setCachedProductLabelPdfBytesWithDate(productPdfWithDate);
+      setCachedProductLabelPdfBytes(productPdf96x25);
+      setCachedProductLabel50x25PdfBytes(productPdf50x25);
       setCachedProductLabelCount(productList.length);
-      
-      // Set current values (only without_date is displayed, matching Python)
-      setProductLabelPdfBytes(productPdfWithoutDate);
-      setProductLabelPdfBytesWithDate(productPdfWithDate);
+
+      // Set current values
+      setProductLabelPdfBytes(productPdf96x25);
+      setProductLabel50x25PdfBytes(productPdf50x25);
       setProductLabelCount(productList.length);
       
       console.log('[Label Caching] Product labels generated and cached. Hash:', currentDataHash.substring(0, 8));
@@ -624,7 +638,7 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
     } finally {
       setIsGeneratingProductLabels(false);
     }
-  }, [physicalItems, masterData, labelCacheHash, currentDataHash, cachedProductLabelPdfBytes, cachedProductLabelPdfBytesWithDate, cachedProductLabelCount, showSuccess, showError]);
+  }, [physicalItems, masterData, labelCacheHash, currentDataHash, cachedProductLabelPdfBytes, cachedProductLabel50x25PdfBytes, cachedProductLabelCount, showSuccess, showError]);
 
   const handleGenerateMrpLabels = useCallback(async () => {
     if (physicalItems.length === 0) {
@@ -661,6 +675,32 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
       setIsGeneratingMrpLabels(false);
     }
   }, [physicalItems, masterData, labelCacheHash, currentDataHash, cachedMrpPdfBytes, cachedMrpCount, showSuccess, showError]);
+
+  const handleGenerateCombinedVerticalLabels = useCallback(async () => {
+    if (physicalItems.length === 0) {
+      showError('No data', 'No physical items to generate labels for. Please process PDFs first.');
+      return;
+    }
+    if (labelCacheHash === currentDataHash && cachedCombinedVerticalPdfBytes) {
+      setCombinedVerticalPdfBytes(cachedCombinedVerticalPdfBytes);
+      setCombinedVerticalCount(cachedCombinedVerticalCount);
+      return;
+    }
+    setIsGeneratingCombinedVertical(true);
+    try {
+      const { combinedVerticalPdfBytes: pdfBytes, combinedVerticalCount: count } =
+        await generateCombinedVerticalLabels(physicalItems, masterData);
+      setCachedCombinedVerticalPdfBytes(pdfBytes);
+      setCachedCombinedVerticalCount(count);
+      setCombinedVerticalPdfBytes(pdfBytes);
+      setCombinedVerticalCount(count);
+      showSuccess('Labels generated', `Generated ${count} combined vertical sticker labels`);
+    } catch (error: any) {
+      showError('Generation failed', `Error generating combined vertical labels: ${error.message || error}`);
+    } finally {
+      setIsGeneratingCombinedVertical(false);
+    }
+  }, [physicalItems, masterData, labelCacheHash, currentDataHash, cachedCombinedVerticalPdfBytes, cachedCombinedVerticalCount, showSuccess, showError]);
 
   // Download PDF
   const downloadPdf = (pdfBytes: Uint8Array, filename: string) => {
@@ -709,64 +749,33 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
   const status = getStatus();
 
   return (
-    <div className="w-full space-y-6">
-      {/* Header Section */}
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-blue-100 rounded-lg">
-              <ShoppingCart className="h-6 w-6 text-blue-600" />
-            </div>
-            <div>
-              <h2 className="text-2xl font-bold text-gray-900">Amazon Packing Plan</h2>
-              <p className="text-gray-600 mt-1">Process invoice PDFs and generate packing plans</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-4">
-            <div className="text-right">
-              <p className="text-sm text-gray-500">Status</p>
-              <p className={`text-sm font-semibold ${status.color}`}>{status.text}</p>
-            </div>
-            {processingComplete && physicalItems.length > 0 && (
-              <div className="flex items-center gap-2 px-3 py-1.5 bg-green-50 rounded-md border border-green-200">
-                <CheckCircle className="h-4 w-4 text-green-600" />
-                <span className="text-sm font-medium text-green-700">{physicalItems.length} items</span>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
+    <div className="w-full">
       {/* Main Content Card */}
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200">
-        {/* Enhanced Tabs */}
-        <div className="border-b border-gray-200">
-          <nav className="flex -mb-px px-6">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        {/* Tabs */}
+        <div className="border-b border-gray-200 bg-gray-50">
+          <nav className="flex">
             {([
-              { key: 'upload', label: 'Upload', icon: Upload, badge: pdfFiles.length },
-              { key: 'results', label: 'Results', icon: FileText, badge: orders.length },
-              { key: 'downloads', label: 'Downloads', icon: Download, badge: processingComplete ? 3 : 0 },
-              { key: 'labels', label: 'Labels', icon: Tag, badge: stickerCount + houseCount + productLabelCount + mrpCount }
-            ] as const).map(({ key, label, icon: Icon, badge }) => (
+              { key: 'upload',    label: 'Upload',    icon: '📤', badge: pdfFiles.length },
+              { key: 'results',   label: 'Results',   icon: '📊', badge: orders.length },
+              { key: 'downloads', label: 'Downloads', icon: '💾', badge: processingComplete ? 3 : 0 },
+              { key: 'labels',    label: 'Labels',    icon: '🏷️', badge: stickerCount + houseCount + productLabelCount + mrpCount + combinedVerticalCount }
+            ] as const).map(({ key, label, icon, badge }) => (
               <button
                 key={key}
                 onClick={() => setActiveTab(key)}
-                className={`
-                  relative px-6 py-4 text-sm font-medium border-b-2 transition-all flex items-center gap-2
+                className={`flex items-center gap-2 px-5 py-3.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap
                   ${activeTab === key
-                    ? 'border-blue-500 text-blue-600 bg-blue-50'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 hover:bg-gray-50'
-                  }
-                `}
+                    ? 'border-blue-500 text-blue-600 bg-white'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-white/60'
+                  }`}
               >
-                <Icon className="h-4 w-4" />
+                <span>{icon}</span>
                 <span>{label}</span>
                 {badge > 0 && (
-                  <span className={`ml-1 px-2 py-0.5 text-xs font-semibold rounded-full ${
-                    activeTab === key ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700'
-                  }`}>
-                    {badge}
-                  </span>
+                  <span className={`text-xs px-1.5 py-0.5 rounded-full font-semibold ${
+                    activeTab === key ? 'bg-blue-100 text-blue-700' : 'bg-gray-200 text-gray-600'
+                  }`}>{badge}</span>
                 )}
               </button>
             ))}
@@ -774,14 +783,10 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
         </div>
 
         {/* Tab Content */}
-        <div className="p-6">
+        <div className="p-5">
           {/* Upload Tab */}
           {activeTab === 'upload' && (
-            <div className="p-6 animate-fadeIn">
-              <div className="mb-6">
-                <h3 className="text-lg font-semibold text-gray-900 mb-2">Upload Invoice PDFs</h3>
-                <p className="text-sm text-gray-600">Upload Amazon invoice PDF files to extract order information and generate packing plans</p>
-              </div>
+            <div className="animate-fadeIn">
               
               {pdfFiles.length === 0 ? (
                 <FileUploadZone
@@ -941,9 +946,9 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
               )}
 
               {/* Master Data Preview */}
-              <details className="mt-6 bg-gray-50 border border-gray-200 rounded-lg p-4">
-                <summary className="cursor-pointer text-sm font-semibold text-gray-700 flex items-center gap-2 hover:text-gray-900">
-                  <Package className="h-4 w-4" />
+              <details className="mt-4 bg-gray-50 border border-gray-200 rounded-lg p-3">
+                <summary className="cursor-pointer text-xs font-semibold text-gray-600 flex items-center gap-2 hover:text-gray-900 uppercase tracking-wide">
+                  <Package className="h-3.5 w-3.5" />
                   Master Data Preview
                 </summary>
                 <div className="mt-4 overflow-x-auto">
@@ -975,7 +980,7 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
 
           {/* Results Tab */}
           {activeTab === 'results' && (
-            <div className="p-6">
+            <div>
               {orders.length > 0 ? (
                 <>
                   {/* Debug Information Toggle */}
@@ -1044,61 +1049,42 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
                     </div>
                   )}
 
-                  {/* Statistics Cards */}
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                    <StatCard
-                      title="Orders"
-                      value={orders.length}
-                      icon={ShoppingCart}
-                      color="blue"
-                      subtitle={`${stats.total_invoices} invoices`}
-                    />
-                    <StatCard
-                      title="Physical Items"
-                      value={physicalItems.length}
-                      icon={Box}
-                      color="green"
-                      subtitle={`${stats.total_qty_physical} total qty`}
-                    />
-                    <StatCard
-                      title="Qty Ordered"
-                      value={stats.total_qty_ordered}
-                      icon={Package}
-                      color="purple"
-                    />
-                    <StatCard
-                      title="Qty Physical"
-                      value={stats.total_qty_physical}
-                      icon={CheckCircle}
-                      color="green"
-                    />
+                  {/* Statistics — compact inline */}
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-5">
+                    {[
+                      { label: 'Invoices',     value: stats.total_invoices,     color: 'blue' },
+                      { label: 'Multi-Qty',    value: stats.multi_qty_invoices, color: 'amber' },
+                      { label: 'Orders',       value: orders.length,            color: 'violet' },
+                      { label: 'Qty Ordered',  value: stats.total_qty_ordered,  color: 'green' },
+                      { label: 'Qty Physical', value: stats.total_qty_physical, color: 'teal' },
+                    ].map(({ label, value, color }) => (
+                      <div key={label} className={`rounded-lg p-3 border bg-${color}-50 border-${color}-100`}>
+                        <p className={`text-xs font-medium text-${color}-600 mb-1`}>{label}</p>
+                        <p className={`text-2xl font-bold text-${color}-800`}>{value}</p>
+                      </div>
+                    ))}
                   </div>
 
                   {/* Missing Products Warning */}
                   {missingProducts.length > 0 && (
-                    <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6 rounded-r-lg">
-                      <div className="flex">
-                        <AlertCircle className="h-5 w-5 text-yellow-600 mr-3 flex-shrink-0 mt-0.5" />
-                        <div className="flex-1">
-                          <p className="text-sm font-semibold text-yellow-800 mb-2">
-                            {missingProducts.length} product(s) have issues
-                          </p>
-                          <details className="mt-2">
-                            <summary className="cursor-pointer text-sm text-yellow-700 hover:text-yellow-800 font-medium">
-                              View details
-                            </summary>
-                            <div className="mt-3">
-                              <SearchableTable
-                                data={missingProducts}
-                                columns={[
-                                  { key: 'ASIN', label: 'ASIN', sortable: true },
-                                  { key: 'Issue', label: 'Issue', sortable: true },
-                                  { key: 'Product', label: 'Product', sortable: true }
-                                ]}
-                                searchPlaceholder="Search missing products..."
-                                exportFilename="missing_products"
-                                emptyMessage="No missing products"
-                              />
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-5">
+                      <div className="flex items-start gap-2">
+                        <AlertCircle className="h-4 w-4 text-amber-500 mt-0.5 flex-shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-amber-800">{missingProducts.length} product(s) have issues</p>
+                          <details className="mt-1.5">
+                            <summary className="cursor-pointer text-xs text-amber-600 hover:text-amber-800">View details</summary>
+                            <div className="mt-2 overflow-x-auto rounded border border-amber-200">
+                              <table className="min-w-full text-xs">
+                                <thead className="bg-amber-100">
+                                  <tr>{['ASIN', 'Issue', 'Product'].map(h => <th key={h} className="px-3 py-1.5 text-left font-semibold text-amber-800">{h}</th>)}</tr>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-amber-100">
+                                  {missingProducts.map((item, idx) => (
+                                    <tr key={idx}><td className="px-3 py-1.5 font-mono">{item.ASIN}</td><td className="px-3 py-1.5 text-red-600">{item.Issue}</td><td className="px-3 py-1.5">{item.Product || '—'}</td></tr>
+                                  ))}
+                                </tbody>
+                              </table>
                             </div>
                           </details>
                         </div>
@@ -1107,8 +1093,8 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
                   )}
 
                   {/* Ordered Items Table */}
-                  <div className="mb-6">
-                    <h4 className="text-lg font-semibold text-gray-900 mb-4">Ordered Items</h4>
+                  <div className="mb-5">
+                    <h4 className="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-2">Ordered Items</h4>
                     <SearchableTable
                       data={orders}
                       columns={[
@@ -1129,8 +1115,8 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
                     />
                   </div>
 
-                  <div className="mb-6 border-t border-gray-200 pt-6">
-                    <h4 className="text-lg font-semibold text-gray-900 mb-4">Physical Packing Plan</h4>
+                  <div className="border-t border-gray-100 pt-5">
+                    <h4 className="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-2">Physical Packing Plan</h4>
                     <SearchableTable
                       data={physicalItems}
                       columns={[
@@ -1191,111 +1177,72 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
 
           {/* Downloads Tab */}
           {activeTab === 'downloads' && (
-            <div className="p-6">
+            <div>
               {!processingComplete && pdfFiles.length > 0 ? (
                 <div className="text-center py-12">
-                  <Loader2 className="mx-auto h-12 w-12 text-gray-400 animate-spin" />
-                  <h3 className="mt-2 text-sm font-medium text-gray-900">Processing files...</h3>
-                  <p className="mt-1 text-sm text-gray-500">Please wait for processing to complete.</p>
+                  <Loader2 className="mx-auto h-10 w-10 text-gray-300 animate-spin" />
+                  <p className="mt-3 text-sm text-gray-500">Processing files, please wait…</p>
                 </div>
               ) : physicalItems.length > 0 && processingComplete ? (
-                <div className="space-y-4">
-                  <div className="mb-6">
-                    <h3 className="text-lg font-semibold text-gray-900 mb-2">Available Downloads</h3>
-                    <p className="text-sm text-gray-600">Download packing plans, Excel workbooks, and highlighted invoices</p>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* Packing Plan PDF */}
-                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-5 hover:shadow-md transition-shadow">
-                      <div className="flex items-start justify-between mb-4">
-                        <div className="flex items-center gap-3">
-                          <div className="p-2 bg-blue-100 rounded-lg">
-                            <FileText className="h-5 w-5 text-blue-600" />
-                          </div>
-                          <div>
-                            <h4 className="font-semibold text-gray-900">Packing Plan PDF</h4>
-                            <p className="text-xs text-gray-600 mt-0.5">Complete packing plan summary</p>
-                          </div>
-                        </div>
-                      </div>
-                      <button
-                        onClick={handleDownloadSummaryPdf}
-                        className="w-full px-4 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center justify-center gap-2 font-medium shadow-sm hover:shadow-md transition-all"
+                <div className="space-y-3">
+                  {/* Reports */}
+                  <div>
+                    <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Reports</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <DownloadButton
+                        onDownload={handleDownloadSummaryPdf}
+                        tickSize="h-4 w-4"
+                        className="flex items-center gap-3 px-4 py-3.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors shadow-sm text-left"
                       >
-                        <Download className="w-4 h-4" />
-                        Download PDF
-                      </button>
-                    </div>
-
-                    {/* Excel Workbook */}
-                    <div className="bg-green-50 border border-green-200 rounded-lg p-5 hover:shadow-md transition-shadow">
-                      <div className="flex items-start justify-between mb-4">
-                        <div className="flex items-center gap-3">
-                          <div className="p-2 bg-green-100 rounded-lg">
-                            <FileSpreadsheet className="h-5 w-5 text-green-600" />
-                          </div>
-                          <div>
-                            <h4 className="font-semibold text-gray-900">Excel Workbook</h4>
-                            <p className="text-xs text-gray-600 mt-0.5">Spreadsheet with all data</p>
-                          </div>
+                        <div className="p-1.5 bg-white/20 rounded-md"><Download className="w-4 h-4" /></div>
+                        <div>
+                          <p className="font-medium text-sm">Packing Plan</p>
+                          <p className="text-xs text-blue-200">PDF summary</p>
                         </div>
-                      </div>
-                      <button
-                        onClick={handleDownloadExcel}
-                        className="w-full px-4 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center justify-center gap-2 font-medium shadow-sm hover:shadow-md transition-all"
+                      </DownloadButton>
+                      <DownloadButton
+                        onDownload={handleDownloadExcel}
+                        tickSize="h-4 w-4"
+                        className="flex items-center gap-3 px-4 py-3.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors shadow-sm text-left"
                       >
-                        <Download className="w-4 h-4" />
-                        Download Excel
-                      </button>
+                        <div className="p-1.5 bg-white/20 rounded-md"><Download className="w-4 h-4" /></div>
+                        <div>
+                          <p className="font-medium text-sm">Excel Workbook</p>
+                          <p className="text-xs text-emerald-200">.xlsx with all data</p>
+                        </div>
+                      </DownloadButton>
                     </div>
                   </div>
 
                   {/* Highlighted Invoices */}
-                  <div className="bg-purple-50 border border-purple-200 rounded-lg p-5">
-                    <div className="flex items-start justify-between mb-4">
-                      <div className="flex items-center gap-3">
-                        <div className="p-2 bg-purple-100 rounded-lg">
-                          <FileText className="h-5 w-5 text-purple-600" />
-                        </div>
-                        <div className="flex-1">
-                          <h4 className="font-semibold text-gray-900">Highlighted Invoices PDF</h4>
-                          <p className="text-xs text-gray-600 mt-0.5">Original invoices with extracted ASINs highlighted</p>
-                        </div>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => {
+                  <div>
+                    <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Highlighted Invoices</p>
+                    <DownloadButton
+                      onDownload={() => {
                         if (highlightedPdfBytes) {
                           downloadPdf(highlightedPdfBytes, `Highlighted_Invoices_${new Date().toISOString().split('T')[0]}.pdf`);
                         } else {
-                          showError('PDF not available', 'Highlighted PDF is not available. This may occur if PDF highlighting failed during processing. The packing plan PDF and Excel workbook are still available.');
+                          showError('PDF not available', 'Highlighted PDF is not available.');
                         }
                       }}
                       disabled={!highlightedPdfBytes}
-                      className={`w-full px-4 py-2.5 flex items-center justify-center gap-2 font-medium rounded-lg shadow-sm hover:shadow-md transition-all ${
-                        highlightedPdfBytes
-                          ? 'bg-purple-600 text-white hover:bg-purple-700'
-                          : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                      tickSize="h-4 w-4"
+                      className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-lg transition-colors shadow-sm text-left ${
+                        highlightedPdfBytes ? 'bg-violet-600 text-white hover:bg-violet-700' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
                       }`}
                     >
-                      <Download className="w-4 h-4" />
-                      {highlightedPdfBytes ? 'Download Highlighted PDF' : 'Not Available'}
-                    </button>
+                      <div className="p-1.5 bg-white/20 rounded-md"><Download className="w-4 h-4" /></div>
+                      <div>
+                        <p className="font-medium text-sm">Highlighted Invoices PDF</p>
+                        <p className={`text-xs ${highlightedPdfBytes ? 'text-violet-200' : 'text-gray-400'}`}>
+                          {highlightedPdfBytes ? 'ASINs highlighted in original invoices' : 'Not available — PDF highlighting failed'}
+                        </p>
+                      </div>
+                    </DownloadButton>
                     {highlightingFailed && (
-                      <div className="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-                        <div className="flex items-start gap-2">
-                          <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0 text-yellow-600" />
-                          <div className="flex-1">
-                            <p className="text-xs font-medium text-yellow-800 mb-1">PDF highlighting failed during processing</p>
-                            <p className="text-xs text-yellow-700">
-                              The highlighted PDF is not available, but other downloads work normally. This may occur if one or more PDF files are corrupted, password-protected, or in an unsupported format.
-                            </p>
-                            <p className="text-xs text-yellow-600 mt-2">
-                              <strong>Tip:</strong> Try processing files one at a time if you encounter memory errors, or ensure PDFs are not password-protected. Check browser console for detailed error information.
-                            </p>
-                          </div>
-                        </div>
+                      <div className="mt-2 flex items-start gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
+                        <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                        PDF highlighting failed. Other downloads work normally. PDFs may be corrupted or password-protected.
                       </div>
                     )}
                   </div>
@@ -1303,13 +1250,9 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
               ) : (
                 <EmptyState
                   variant="no-data"
-                  title="No downloads available"
+                  title="No downloads yet"
                   description="Process PDF files first to generate downloads"
-                  icon={<FileText className="h-12 w-12 text-gray-400" />}
-                  action={{
-                    label: 'Upload PDFs',
-                    onClick: () => setActiveTab('upload')
-                  }}
+                  action={{ label: 'Upload PDFs', onClick: () => setActiveTab('upload') }}
                 />
               )}
             </div>
@@ -1317,233 +1260,215 @@ const AmazonPackingPlanView: React.FC<AmazonPackingPlanViewProps> = ({ masterDat
 
           {/* Labels Tab */}
           {activeTab === 'labels' && (
-            <div className="p-6">
+            <div className="p-4">
               {!processingComplete && pdfFiles.length > 0 ? (
-                <div className="text-center py-12">
-                  <Loader2 className="mx-auto h-12 w-12 text-gray-400 animate-spin" />
-                  <h3 className="mt-2 text-sm font-medium text-gray-900">Processing files...</h3>
-                  <p className="mt-1 text-sm text-gray-500">Please wait for processing to complete.</p>
+                <div className="flex items-center gap-3 py-6 justify-center text-gray-500">
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                  <span className="text-sm">Please wait for processing to complete.</span>
                 </div>
               ) : physicalItems.length > 0 && processingComplete ? (
-                <>
-                  <div className="mb-6">
-                    <h3 className="text-lg font-semibold text-gray-900 mb-2">Label Generation</h3>
-                    <p className="text-sm text-gray-600">Generate sticker labels, house labels, product labels, and MRP-only labels</p>
-                  </div>
+                <div className="flex gap-5 items-start">
+                  {/* Left column — normal labels */}
+                  <div className="flex-1 min-w-0 space-y-2">
+                  {/* Generate All button */}
+                  {!isGeneratingLabels && !isGeneratingCombinedVertical && !isGeneratingProductLabels && !isGeneratingMrpLabels && (
+                    <div className="flex justify-end mb-1">
+                      <button
+                        onClick={async () => {
+                          await handleGenerateLabels();
+                          await handleGenerateCombinedVerticalLabels();
+                          await handleGenerateProductLabels();
+                          await handleGenerateMrpLabels();
+                        }}
+                        className="flex items-center gap-2 px-4 py-2 bg-gray-900 text-white text-sm font-medium rounded-lg hover:bg-gray-700 transition-colors"
+                      >
+                        <Tag className="h-4 w-4" /> Generate All Labels
+                      </button>
+                    </div>
+                  )}
 
-                  {/* Sticker and House Labels Section */}
-                  <div className="mb-8">
-                    <h4 className="text-md font-semibold text-gray-800 mb-4">Sticker & House Labels</h4>
-                    {stickerCount === 0 && houseCount === 0 && !isGeneratingLabels && (
-                      <div className="mb-4">
-                        <button
-                          onClick={handleGenerateLabels}
-                          className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2 font-medium shadow-sm hover:shadow-md transition-all"
-                        >
-                          <Tag className="w-5 h-5" />
-                          Generate Sticker & House Labels
+                  {/* Sticker + House row — one Generate button for both */}
+                  <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                    <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-100">
+                      <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Sticker &amp; House Labels</span>
+                      {stickerCount === 0 && houseCount === 0 && !isGeneratingLabels && (
+                        <button onClick={handleGenerateLabels} className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-md hover:bg-blue-700 transition-colors">
+                          <Tag className="h-3.5 w-3.5" /> Generate
                         </button>
+                      )}
+                      {isGeneratingLabels && <div className="flex items-center gap-1.5 text-xs text-blue-600"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Generating…</div>}
+                    </div>
+
+                    {/* Sticker row */}
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+                      <div>
+                        <p className="text-sm font-medium text-gray-800">Sticker Labels</p>
+                        <p className="text-xs text-gray-400">48×25mm combined</p>
                       </div>
-                    )}
-
-                    {isGeneratingLabels && (
-                      <div className="text-center py-8 bg-blue-50 rounded-lg border border-blue-200">
-                        <Loader2 className="mx-auto h-8 w-8 animate-spin text-blue-600" />
-                        <p className="mt-2 text-sm text-gray-600">Generating labels...</p>
+                      <div className="flex items-center gap-2">
+                        {stickerCount > 0 && <span className="text-sm font-bold text-blue-600 w-6 text-right">{stickerCount}</span>}
+                        {stickerPdfBytes && stickerCount > 0 ? (
+                          <DownloadButton onDownload={() => downloadPdf(stickerPdfBytes, `Sticker_Labels_${new Date().toISOString().split('T')[0]}.pdf`)} className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-md hover:bg-blue-700 transition-colors">
+                            <Download className="h-3.5 w-3.5" /> Download
+                          </DownloadButton>
+                        ) : !isGeneratingLabels && <span className="text-xs text-gray-400">Not generated</span>}
                       </div>
-                    )}
+                    </div>
 
-                    {(stickerCount > 0 || houseCount > 0) && (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        {stickerCount > 0 && stickerPdfBytes && (
-                          <div className="bg-blue-50 border border-blue-200 rounded-lg p-5 hover:shadow-md transition-shadow">
-                            <div className="flex items-center justify-between mb-4">
-                              <div className="flex items-center gap-3">
-                                <div className="p-2 bg-blue-100 rounded-lg">
-                                  <Tag className="h-5 w-5 text-blue-600" />
-                                </div>
-                                <div>
-                                  <h5 className="font-semibold text-gray-900">Sticker Labels</h5>
-                                  <p className="text-xs text-gray-600">48x25mm combined labels</p>
-                                </div>
-                              </div>
-                            </div>
-                            <div className="mb-4">
-                              <p className="text-3xl font-bold text-blue-900">{stickerCount}</p>
-                              <p className="text-xs text-gray-600 mt-1">labels generated</p>
-                            </div>
-                            <button
-                              onClick={() => downloadPdf(stickerPdfBytes, `Sticker_Labels_${new Date().toISOString().split('T')[0]}.pdf`)}
-                              className="w-full px-4 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center justify-center gap-2 font-medium shadow-sm hover:shadow-md transition-all"
-                            >
-                              <Download className="w-4 h-4" />
-                              Download ({stickerCount})
-                            </button>
-                          </div>
-                        )}
-
-                        {houseCount > 0 && housePdfBytes && (
-                          <div className="bg-green-50 border border-green-200 rounded-lg p-5 hover:shadow-md transition-shadow">
-                            <div className="flex items-center justify-between mb-4">
-                              <div className="flex items-center gap-3">
-                                <div className="p-2 bg-green-100 rounded-lg">
-                                  <Tag className="h-5 w-5 text-green-600" />
-                                </div>
-                                <div>
-                                  <h5 className="font-semibold text-gray-900">House Labels</h5>
-                                  <p className="text-xs text-gray-600">50x100mm triple labels</p>
-                                </div>
-                              </div>
-                            </div>
-                            <div className="mb-4">
-                              <p className="text-3xl font-bold text-green-900">{houseCount}</p>
-                              <p className="text-xs text-gray-600 mt-1">labels generated</p>
-                            </div>
-                            <button
-                              onClick={() => downloadPdf(housePdfBytes, `House_Labels_${new Date().toISOString().split('T')[0]}.pdf`)}
-                              className="w-full px-4 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center justify-center gap-2 font-medium shadow-sm hover:shadow-md transition-all mb-2"
-                            >
-                              <Download className="w-4 h-4" />
-                              Download ({houseCount})
-                            </button>
-                            {house4x6VerticalPdfBytes && house4x6VerticalCount > 0 && (
-                              <button
-                                onClick={() => downloadPdf(house4x6VerticalPdfBytes, `House_4x6inch_Vertical_${new Date().toISOString().split('T')[0]}.pdf`)}
-                                className="w-full px-4 py-2.5 bg-green-500 text-white rounded-lg hover:bg-green-600 flex items-center justify-center gap-2 font-medium shadow-sm hover:shadow-md transition-all"
-                                title="4×6 inch format with 3 labels stacked vertically, rotated 90° (50×100mm labels)"
-                              >
-                                <Download className="w-4 h-4" />
-                                House in 4x6inch (Vertical) ({house4x6VerticalCount} pages)
-                              </button>
+                    {/* House row */}
+                    <div className="flex items-center justify-between px-4 py-3">
+                      <div>
+                        <p className="text-sm font-medium text-gray-800">House Labels</p>
+                        <p className="text-xs text-gray-400">50×100mm triple</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {houseCount > 0 && <span className="text-sm font-bold text-green-600 w-6 text-right">{houseCount}</span>}
+                        {housePdfBytes && houseCount > 0 ? (
+                          <div className="flex items-center gap-1.5">
+                            <DownloadButton onDownload={() => downloadPdf(housePdfBytes, `House_Labels_${new Date().toISOString().split('T')[0]}.pdf`)} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white text-xs font-medium rounded-md hover:bg-green-700 transition-colors">
+                              <Download className="h-3.5 w-3.5" /> Download
+                            </DownloadButton>
+                            {flags.show4x6Vertical && house4x6VerticalPdfBytes && house4x6VerticalCount > 0 && (
+                              <DownloadButton onDownload={() => downloadPdf(house4x6VerticalPdfBytes, `House_4x6inch_Vertical_${new Date().toISOString().split('T')[0]}.pdf`)} className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-600 text-white text-xs font-medium rounded-md hover:bg-teal-700 transition-colors" title="4×6 inch format, 3 labels per page">
+                                <Download className="h-3.5 w-3.5" /> 4×6 Vertical
+                              </DownloadButton>
                             )}
                           </div>
-                        )}
+                        ) : !isGeneratingLabels && <span className="text-xs text-gray-400">Not generated</span>}
                       </div>
-                    )}
-
-                    {skippedProducts.length > 0 && (
-                      <div className="mt-6">
-                        <details className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-                          <summary className="cursor-pointer text-sm font-semibold text-yellow-800 flex items-center gap-2">
-                            <AlertCircle className="h-4 w-4" />
-                            Products Skipped from Label Generation ({skippedProducts.length})
-                          </summary>
-                          <div className="mt-4">
-                            <SearchableTable
-                              data={skippedProducts}
-                              columns={[
-                                { key: 'Product', label: 'Product', sortable: true },
-                                { key: 'ASIN', label: 'ASIN', sortable: true },
-                                { key: 'Packet used', label: 'Packet used', sortable: true },
-                                { key: 'Reason', label: 'Reason', sortable: true }
-                              ]}
-                              searchPlaceholder="Search skipped products..."
-                              exportFilename="skipped_products"
-                              emptyMessage="No skipped products"
-                            />
-                          </div>
-                        </details>
-                      </div>
-                    )}
+                    </div>
                   </div>
 
-                  {/* Product Labels Section */}
-                  <div className="mb-8 border-t border-gray-200 pt-6">
-                    <h4 className="text-md font-semibold text-gray-800 mb-4">Product Labels (96x25mm)</h4>
-                    {!productLabelPdfBytes && !isGeneratingProductLabels && (
-                      <button
-                        onClick={handleGenerateProductLabels}
-                        className="px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 flex items-center gap-2 font-medium shadow-sm hover:shadow-md transition-all"
-                      >
-                        <Tag className="w-5 h-5" />
-                        Generate Product Labels
-                      </button>
-                    )}
-                    {isGeneratingProductLabels && (
-                      <div className="text-center py-8 bg-indigo-50 rounded-lg border border-indigo-200">
-                        <Loader2 className="mx-auto h-6 w-6 animate-spin text-indigo-600" />
-                        <p className="mt-2 text-sm text-gray-600">Generating product labels...</p>
-                      </div>
-                    )}
-                    {productLabelPdfBytes && productLabelCount > 0 && (
-                      <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-5 hover:shadow-md transition-shadow">
-                        <div className="flex items-center justify-between mb-4">
-                          <div className="flex items-center gap-3">
-                            <div className="p-2 bg-indigo-100 rounded-lg">
-                              <Tag className="h-5 w-5 text-indigo-600" />
-                            </div>
-                            <div>
-                              <h5 className="font-semibold text-gray-900">Product Labels</h5>
-                              <p className="text-xs text-gray-600">96x25mm product name labels</p>
-                            </div>
-                          </div>
-                        </div>
-                        <div className="mb-4">
-                          <p className="text-3xl font-bold text-indigo-900">{productLabelCount}</p>
-                          <p className="text-xs text-gray-600 mt-1">labels generated</p>
-                        </div>
-                        <button
-                          onClick={() => downloadPdf(productLabelPdfBytes, `Product_Labels_No_Date_${new Date().toISOString().split('T')[0]}.pdf`)}
-                          className="w-full px-4 py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 flex items-center justify-center gap-2 font-medium shadow-sm hover:shadow-md transition-all"
-                        >
-                          <Download className="w-4 h-4" />
-                          Download without Date ({productLabelCount})
+                  {/* Combined Vertical Sticker row */}
+                  <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                    <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-100">
+                      <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Combined Vertical Sticker</span>
+                      {!combinedVerticalPdfBytes && !isGeneratingCombinedVertical && (
+                        <button onClick={handleGenerateCombinedVerticalLabels} className="flex items-center gap-1.5 px-3 py-1.5 bg-orange-600 text-white text-xs font-medium rounded-md hover:bg-orange-700 transition-colors">
+                          <Tag className="h-3.5 w-3.5" /> Generate
                         </button>
+                      )}
+                      {isGeneratingCombinedVertical && <div className="flex items-center gap-1.5 text-xs text-orange-600"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Generating…</div>}
+                    </div>
+                    <div className="flex items-center justify-between px-4 py-3">
+                      <div>
+                        <p className="text-sm font-medium text-gray-800">Combined Vertical Sticker Labels</p>
+                        <p className="text-xs text-gray-400">2-page per label: MRP (50×25mm) + Barcode (50×25mm)</p>
                       </div>
-                    )}
+                      <div className="flex items-center gap-2">
+                        {combinedVerticalCount > 0 && <span className="text-sm font-bold text-orange-600 w-6 text-right">{combinedVerticalCount}</span>}
+                        {combinedVerticalPdfBytes && combinedVerticalCount > 0 ? (
+                          <DownloadButton onDownload={() => downloadPdf(combinedVerticalPdfBytes, `Combined_Vertical_Labels_${new Date().toISOString().split('T')[0]}.pdf`)} className="flex items-center gap-1.5 px-3 py-1.5 bg-orange-600 text-white text-xs font-medium rounded-md hover:bg-orange-700 transition-colors">
+                            <Download className="h-3.5 w-3.5" /> Download
+                          </DownloadButton>
+                        ) : !isGeneratingCombinedVertical && <span className="text-xs text-gray-400">Not generated</span>}
+                      </div>
+                    </div>
                   </div>
 
-                  {/* MRP-Only Labels Section */}
-                  <div className="mb-8 border-t border-gray-200 pt-6">
-                    <h4 className="text-md font-semibold text-gray-800 mb-4">MRP-Only Labels</h4>
-                    {!mrpPdfBytes && !isGeneratingMrpLabels && (
-                      <button
-                        onClick={handleGenerateMrpLabels}
-                        className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 flex items-center gap-2 font-medium shadow-sm hover:shadow-md transition-all"
-                      >
-                      <Tag className="w-5 h-5" />
-                      Generate MRP-Only Labels
-                    </button>
-                    )}
-                    {isGeneratingMrpLabels && (
-                      <div className="text-center py-8 bg-purple-50 rounded-lg border border-purple-200">
-                        <Loader2 className="mx-auto h-6 w-6 animate-spin text-purple-600" />
-                        <p className="mt-2 text-sm text-gray-600">Generating MRP labels...</p>
-                      </div>
-                    )}
-                    {mrpPdfBytes && mrpCount > 0 && (
-                      <div className="bg-purple-50 border border-purple-200 rounded-lg p-5 hover:shadow-md transition-shadow">
-                        <div className="flex items-center justify-between mb-4">
-                          <div className="flex items-center gap-3">
-                            <div className="p-2 bg-purple-100 rounded-lg">
-                              <Tag className="h-5 w-5 text-purple-600" />
-                            </div>
-                            <div>
-                              <h5 className="font-semibold text-gray-900">MRP-Only Labels</h5>
-                              <p className="text-xs text-gray-600">48x25mm MRP labels</p>
-                            </div>
-                          </div>
-                        </div>
-                        <div className="mb-4">
-                          <p className="text-3xl font-bold text-purple-900">{mrpCount}</p>
-                          <p className="text-xs text-gray-600 mt-1">labels generated</p>
-                        </div>
-                        <button
-                          onClick={() => downloadPdf(mrpPdfBytes, `MRP_Only_Labels_${new Date().toISOString().split('T')[0]}.pdf`)}
-                          className="w-full px-4 py-2.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 flex items-center justify-center gap-2 font-medium shadow-sm hover:shadow-md transition-all"
-                        >
-                          <Download className="w-4 h-4" />
-                          Download ({mrpCount})
+                  {/* Product Labels row */}
+                  <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                    <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-100">
+                      <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Product Labels</span>
+                      {!productLabelPdfBytes && !isGeneratingProductLabels && (
+                        <button onClick={handleGenerateProductLabels} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white text-xs font-medium rounded-md hover:bg-indigo-700 transition-colors">
+                          <Tag className="h-3.5 w-3.5" /> Generate
                         </button>
+                      )}
+                      {isGeneratingProductLabels && <div className="flex items-center gap-1.5 text-xs text-indigo-600"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Generating…</div>}
+                    </div>
+                    <div className="flex items-center justify-between px-4 py-3">
+                      <div>
+                        <p className="text-sm font-medium text-gray-800">Product Labels</p>
+                        <p className="text-xs text-gray-400">96×25mm · 50×25mm</p>
                       </div>
-                    )}
-                    {mrpPdfBytes && mrpCount === 0 && (
-                      <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-                        <p className="text-sm text-gray-600">No products found without FNSKU.</p>
+                      <div className="flex items-center gap-2">
+                        {productLabelCount > 0 && <span className="text-sm font-bold text-indigo-600 w-6 text-right">{productLabelCount}</span>}
+                        {productLabelPdfBytes && productLabelCount > 0 ? (
+                          <div className="flex items-center gap-1.5">
+                            <DownloadButton onDownload={() => downloadPdf(productLabelPdfBytes, `Product_Labels_96x25_${new Date().toISOString().split('T')[0]}.pdf`)} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white text-xs font-medium rounded-md hover:bg-indigo-700 transition-colors">
+                              <Download className="h-3.5 w-3.5" /> 96×25mm
+                            </DownloadButton>
+                            {productLabel50x25PdfBytes && (
+                              <DownloadButton onDownload={() => downloadPdf(productLabel50x25PdfBytes, `Product_Labels_50x25_${new Date().toISOString().split('T')[0]}.pdf`)} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500 text-white text-xs font-medium rounded-md hover:bg-indigo-600 transition-colors">
+                                <Download className="h-3.5 w-3.5" /> 50×25mm
+                              </DownloadButton>
+                            )}
+                          </div>
+                        ) : !isGeneratingProductLabels && <span className="text-xs text-gray-400">Not generated</span>}
                       </div>
-                    )}
+                    </div>
                   </div>
-                </>
+
+                  {/* MRP-Only Labels row */}
+                  {flags.showMrpOnlyLabels && (
+                  <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                    <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-100">
+                      <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">MRP-Only Labels</span>
+                      {!mrpPdfBytes && !isGeneratingMrpLabels && (
+                        <button onClick={handleGenerateMrpLabels} className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 text-white text-xs font-medium rounded-md hover:bg-purple-700 transition-colors">
+                          <Tag className="h-3.5 w-3.5" /> Generate
+                        </button>
+                      )}
+                      {isGeneratingMrpLabels && <div className="flex items-center gap-1.5 text-xs text-purple-600"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Generating…</div>}
+                    </div>
+                    <div className="flex items-center justify-between px-4 py-3">
+                      <div>
+                        <p className="text-sm font-medium text-gray-800">MRP-Only Labels</p>
+                        <p className="text-xs text-gray-400">48×25mm · products without FNSKU</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {mrpCount > 0 && <span className="text-sm font-bold text-purple-600 w-6 text-right">{mrpCount}</span>}
+                        {mrpPdfBytes && mrpCount > 0 ? (
+                          <DownloadButton onDownload={() => downloadPdf(mrpPdfBytes, `MRP_Only_Labels_${new Date().toISOString().split('T')[0]}.pdf`)} className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 text-white text-xs font-medium rounded-md hover:bg-purple-700 transition-colors">
+                            <Download className="h-3.5 w-3.5" /> Download
+                          </DownloadButton>
+                        ) : mrpPdfBytes && mrpCount === 0 ? (
+                          <span className="text-xs text-gray-400">No items without FNSKU</span>
+                        ) : !isGeneratingMrpLabels && <span className="text-xs text-gray-400">Not generated</span>}
+                      </div>
+                    </div>
+                  </div>
+                  )}
+
+                  {/* Skipped products */}
+                  {skippedProducts.length > 0 && (
+                    <details className="bg-white border border-amber-200 rounded-lg overflow-hidden">
+                      <summary className="cursor-pointer flex items-center gap-2 px-4 py-2.5 bg-amber-50 text-xs font-semibold text-amber-700 hover:bg-amber-100">
+                        <AlertCircle className="h-3.5 w-3.5" /> {skippedProducts.length} product{skippedProducts.length !== 1 ? 's' : ''} skipped from label generation
+                      </summary>
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full text-xs divide-y divide-gray-100">
+                          <thead className="bg-gray-50"><tr>{['Product','ASIN','Packet used','Reason'].map(h => <th key={h} className="px-3 py-2 text-left font-semibold text-gray-500">{h}</th>)}</tr></thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {skippedProducts.map((item, idx) => (
+                              <tr key={idx} className="hover:bg-gray-50">
+                                <td className="px-3 py-2">{item.Product}</td>
+                                <td className="px-3 py-2 font-mono">{item.ASIN}</td>
+                                <td className="px-3 py-2">{item['Packet used']}</td>
+                                <td className="px-3 py-2 text-red-600">{item.Reason}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </details>
+                  )}
+
+                  </div>
+                  {/* Right column — brand-wise labels */}
+                  {flags.showBrandWiseLabels && (
+                    <div className="flex-1 min-w-0">
+                      <BrandWiseLabels
+                        physicalItems={physicalItems}
+                        masterData={masterData}
+                        nutritionData={nutritionData}
+                        show4x6Vertical={flags.show4x6Vertical}
+                        showMrpOnlyLabels={flags.showMrpOnlyLabels}
+                      />
+                    </div>
+                  )}
+                </div>
               ) : (
                 <EmptyState
                   variant="no-data"

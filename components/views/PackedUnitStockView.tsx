@@ -1,5 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { Upload, FileText, Download, AlertCircle, Package, Loader2, BarChart3 } from 'lucide-react';
+import DownloadButton from '../../components/DownloadButton';
 import jsPDF from 'jspdf';
 import { processStockData, StockItem } from '../../services/stockDataProcessor';
 import SearchableTable from '../../components/SearchableTable';
@@ -279,20 +280,22 @@ const PackedUnitStockView: React.FC<PackedUnitStockViewProps> = ({ masterData = 
               </p>
             </div>
             <div className="flex space-x-2">
-              <button
-                onClick={handleExportCSV}
+              <DownloadButton
+                onDownload={handleExportCSV}
+                tickSize="h-5 w-5"
                 className="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 flex items-center transition-colors"
               >
                 <Download className="h-5 w-5 mr-2" />
                 Export CSV
-              </button>
-              <button
-                onClick={handleExportPDF}
+              </DownloadButton>
+              <DownloadButton
+                onDownload={handleExportPDF}
+                tickSize="h-5 w-5"
                 className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 flex items-center transition-colors"
               >
                 <FileText className="h-5 w-5 mr-2" />
                 Export PDF
-              </button>
+              </DownloadButton>
             </div>
           </div>
           <SearchableTable

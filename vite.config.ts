@@ -20,7 +20,7 @@ export default defineConfig(({ mode }) => {
         }
       },
       optimizeDeps: {
-        exclude: ['pdfjs-dist']
+        exclude: ['pdfjs-dist', 'mupdf']
       },
       worker: {
         format: 'es'

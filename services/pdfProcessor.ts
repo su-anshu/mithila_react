@@ -1,30 +1,13 @@
 import * as pdfjsLib from 'pdfjs-dist';
 import { PDFDocument, rgb, PDFPage } from 'pdf-lib';
 
-// Configure PDF.js worker with error handling and fallback
+// Configure PDF.js worker — used only for the highlighting pass (coordinate-based)
 if (typeof window !== 'undefined') {
   try {
-    // Use jsdelivr CDN which is very reliable
     const workerVersion = pdfjsLib.version || '5.4.394';
-
-    // For pdfjs-dist 5.x, the worker is available as .mjs (ES module)
-    const primaryWorkerUrl = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${workerVersion}/build/pdf.worker.min.mjs`;
-    pdfjsLib.GlobalWorkerOptions.workerSrc = primaryWorkerUrl;
-
-    console.log(`[PDF Processing] PDF.js worker configured: ${primaryWorkerUrl}`);
-
-    // Verify worker can be loaded (async check)
-    fetch(primaryWorkerUrl, { method: 'HEAD' })
-      .then(() => {
-        console.log('[PDF Processing] ✓ PDF.js worker URL is accessible');
-      })
-      .catch((error) => {
-        console.warn('[PDF Processing] ⚠️ PDF.js worker URL may not be accessible:', error);
-        console.warn('[PDF Processing] This may cause PDF processing to fail. Check internet connection.');
-      });
-  } catch (workerError) {
-    console.error('[PDF Processing] Error configuring PDF.js worker:', workerError);
-    // Continue anyway - the error will be caught when trying to use pdf.js
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${workerVersion}/build/pdf.worker.min.mjs`;
+  } catch (e) {
+    console.error('[PDF Processing] Error configuring PDF.js worker:', e);
   }
 }
 
@@ -306,8 +289,13 @@ const validateASINContext = (
 };
 
 /**
- * Extract quantity from line using multiple patterns
- * Matches Streamlit implementation order and logic
+ * Extract quantity from line using multiple patterns.
+ * Matches Streamlit (packing_plan.py) implementation exactly:
+ *   search_range = min(i + 6, len(lines))
+ *   Pattern 1: r'\bQty\b.*?(\d+)'
+ *   Pattern 2: r'₹[\d,.]+\s+(\d+)\s+₹[\d,.]+'
+ *   Pattern 3: r'^(\d+)\s+₹[\d,]+\.?\d*\s+\d+%?\s*(IGST|CGST|SGST)'
+ *   Pattern 4: r'^(\d+)' at start + not qty% + not HSN + has ₹
  */
 const extractQuantity = (
   line: string,
@@ -319,154 +307,152 @@ const extractQuantity = (
   diagnosticsArray?: import('../types').QuantityDefault[]
 ): number => {
   let qty = 1;
-  // Search next 8 lines so quantity on a separate line (e.g. line 61 when ASIN on 55) is included
-  const searchRange = Math.min(startIndex + 25, lines.length);
-  const patternsAttempted: string[] = [];
+  // pdf.js Y-coordinate grouping splits rows into more lines than PyMuPDF.
+  // Streamlit uses 6 lines (sufficient for PyMuPDF), but pdf.js needs more because
+  // long product descriptions wrap across many Y-groups before reaching the price/qty row.
+  // Use 15-line window with early termination at invoice boundaries.
+  const maxSearchRange = Math.min(startIndex + 15, lines.length);
 
-  for (let j = startIndex; j < searchRange; j++) {
+  for (let j = startIndex; j < maxSearchRange; j++) {
     const qtyLine = lines[j];
-    // Pattern 1 deleted (Qty keyword pattern removed as per Streamlit)
+    const qtyLineUpper = qtyLine.toUpperCase();
 
-    // Pattern 2: Price-quantity pattern (matches Streamlit order)
-    // Streamlit pattern: r'₹[\d,.]+\s+(\d+)\s+₹[\d,.]+'
-    // Amazon Easy Ship format: "3 ₹2,768.67 5% IGST" (qty BEFORE price, not after)
+    // Early termination: reached a DIFFERENT ASIN (next product row) — check before patterns
+    if (j > startIndex && asin) {
+      const asinMatch = qtyLine.match(/\b(B[0-9A-Z]{9})\b/g);
+      if (asinMatch && !asinMatch.includes(asin)) break;
+    }
+
+    // Pattern 1: Qty keyword pattern — matches "Qty 3", "Qty: 2", etc.
+    // Streamlit: qty_pattern = re.compile(r"\bQty\b.*?(\d+)")
+    const qtyKeywordMatch = qtyLine.match(/\bQty\b.*?(\d+)/i);
+    if (qtyKeywordMatch) {
+      const potentialQty = parseInt(qtyKeywordMatch[1], 10);
+      if (potentialQty >= 1 && potentialQty <= 100) {
+        qty = potentialQty;
+        console.log(`[Quantity Extraction] Found qty ${qty} using Qty-keyword pattern: ${qtyLine.trim()}`);
+        break;
+      }
+    }
+
+    // Pattern 2: Qty between two prices — "₹500 3 ₹1500"
+    // Streamlit: price_qty_pattern = re.compile(r"₹[\d,.]+\s+(\d+)\s+₹[\d,.]+")
+    const priceBothSidesMatch = qtyLine.match(/₹[\d,.]+\s+(\d+)\s+₹[\d,.]+/);
+    if (priceBothSidesMatch) {
+      const potentialQty = parseInt(priceBothSidesMatch[1], 10);
+      if (potentialQty >= 1 && potentialQty <= 100) {
+        qty = potentialQty;
+        console.log(`[Quantity Extraction] Found qty ${qty} using price-both-sides pattern: ${qtyLine.trim()}`);
+        break;
+      }
+    }
+
+    // Pattern 3: Qty at line start followed by ₹ price and tax — "3 ₹2,768.67 5% IGST"
+    // Streamlit: r'^(\d+)\s+₹[\d,]+\.?\d*\s+\d+%?\s*(IGST|CGST|SGST)'
     const priceQtyPattern = /^(\d+)\s+₹[\d,]+\.?\d*\s+\d+%?\s*(IGST|CGST|SGST)/i;
     const priceMatch = qtyLine.trim().match(priceQtyPattern);
     if (priceMatch) {
       const potentialQty = parseInt(priceMatch[1], 10);
       if (potentialQty >= 1 && potentialQty <= 100) {
         qty = potentialQty;
-        console.log(`[Quantity Extraction] Found qty ${qty} using Amazon-format price pattern: ${qtyLine.trim()}`);
+        console.log(`[Quantity Extraction] Found qty ${qty} using qty-price-tax pattern: ${qtyLine.trim()}`);
         break;
       }
     }
 
-    // Pattern 3: Multi-item pattern like "3 ₹2,768.67 5% IGST" (matches Streamlit)
-    const multiItemMatch = qtyLine.trim().match(/^(\d+)\s+₹[\d,.]+\.?\d*\s+\d+%?\s*(IGST|CGST|SGST)/);
-    if (multiItemMatch) {
-      const potentialQty = parseInt(multiItemMatch[1], 10);
-      if (potentialQty >= 1 && potentialQty <= 100) {
-        qty = potentialQty;
-        console.log(`[Quantity Extraction] Found qty ${qty} using multi-item pattern: ${qtyLine.trim()}`);
-        break;
-      }
-    }
-
-    // Pattern 4b (run before 4): Quantity on its own line (no ₹) - common when description spans lines
-    // Amazon layout often has: price line, blank line, then "1" or "2" on next line. Check this first
-    // so we never take a number from a price/discount line (4/5/5b/6) when a dedicated qty line exists.
-    const quantityOnlyLine = qtyLine.trim().match(/^\d+$/);
-    if (quantityOnlyLine) {
-      const potentialQty = parseInt(quantityOnlyLine[0], 10);
-      if (potentialQty >= 1 && potentialQty <= 100) {
-        qty = potentialQty;
-        console.log(`[Quantity Extraction] Found qty ${qty} using quantity-only-line pattern: "${qtyLine.trim()}"`);
-        break;
-      }
-    }
-
-    // Pattern 4: Standalone number followed by price (matches Streamlit - strict validation)
-    // First check at start of line (most common case)
-    // FIXED: Changed to potential_qty >= 1 to allow qty=1 extraction
+    // Pattern 4: Standalone number at start of line + has ₹ on same line + not a tax % + not HSN
+    // Streamlit: r'^(\d+)' at start, not qty%, not HSN:, has ₹
+    // FIX: use /^\d+(\.\d+)?%/ to reject DECIMAL tax percentages like "2.5% SGST ₹7.12".
+    // The original check ^N% only rejected "2%" but NOT "2.5%", causing the digit 2
+    // from "2.5%" to be incorrectly extracted as qty=2.
     const standaloneMatchStart = qtyLine.trim().match(/^(\d+)/);
     if (standaloneMatchStart) {
       const potentialQty = parseInt(standaloneMatchStart[1], 10);
-      // Match Streamlit's strict validation: must have ₹, not tax %, not HSN, and qty >= 1
       if (
         potentialQty >= 1 &&
         potentialQty <= 100 &&
-        !qtyLine.match(new RegExp(`^${potentialQty}%`)) &&
-        !qtyLine.toUpperCase().includes('HSN') &&
+        !qtyLine.trim().match(/^\d+(\.\d+)?%/) &&   // reject any tax % line (e.g. 2.5%, 5%, 18%)
+        !qtyLineUpper.includes('HSN') &&
         qtyLine.includes('₹')
       ) {
         qty = potentialQty;
-        console.log(`[Quantity Extraction] Found qty ${qty} using standalone pattern (start): ${qtyLine.trim()}`);
+        console.log(`[Quantity Extraction] Found qty ${qty} using standalone-start pattern: ${qtyLine.trim()}`);
         break;
       }
     }
 
-    // Pattern 5: Number anywhere in line followed by ₹ (for cases where ASIN/description is before quantity)
-    // Example: "B012345678 Product Name 2 ₹100" - quantity is in middle of line
-    // This matches the highlighting logic pattern: number immediately followed by ₹
-    if (qtyLine.includes('₹')) {
-      // Look for pattern: number followed by space and ₹ (quantity column format)
-      // This is more reliable than just any number, as it matches quantity format in invoice tables
-      const qtyBeforePriceMatch = qtyLine.match(/(\d+)\s+₹/);
-      if (qtyBeforePriceMatch) {
-        const potentialQty = parseInt(qtyBeforePriceMatch[1], 10);
-        // Validate: must be reasonable quantity, not a price or tax percentage
-        if (
-          potentialQty >= 1 &&
-          potentialQty <= 100 &&
-          !qtyLine.match(new RegExp(`\\b${potentialQty}%`)) && // Not a tax percentage
-          !qtyLine.match(new RegExp(`₹[\\d,]+.*?${potentialQty}`)) && // Not part of a price
-          !qtyLine.toUpperCase().includes('HSN')
-        ) {
+  }
+
+  // Backward search fallback: In some Amazon invoices, pdf.js places the ASIN in a
+  // wrapped description line that comes AFTER the price/qty row in Y-coordinate order.
+  // e.g. Line N:   "Thekua 350g    ₹672.51  3  ₹2,019.54"  (price/qty row)
+  //      Line N+k: "B0FLWMFVDN ( thekua 350g p3 )"          (ASIN in wrapped line)
+  // So if forward search found nothing, scan backward from startIndex.
+  if (qty === 1) {
+    const backSearchStart = Math.max(0, startIndex - 12);
+    for (let j = startIndex - 1; j >= backSearchStart; j--) {
+      const qtyLine = lines[j];
+      const qtyLineUpper = qtyLine.toUpperCase();
+
+      // Stop if we hit a different ASIN (previous product's row)
+      if (asin) {
+        const asinMatch = qtyLine.match(/\b(B[0-9A-Z]{9})\b/g);
+        if (asinMatch && !asinMatch.includes(asin)) break;
+      }
+
+      // Pattern 1
+      const qtyKeywordMatch = qtyLine.match(/\bQty\b.*?(\d+)/i);
+      if (qtyKeywordMatch) {
+        const potentialQty = parseInt(qtyKeywordMatch[1], 10);
+        if (potentialQty >= 1 && potentialQty <= 100) {
           qty = potentialQty;
-          console.log(`[Quantity Extraction] Found qty ${qty} using qty-before-price pattern: ${qtyLine.trim()}`);
+          console.log(`[Quantity Extraction] Found qty ${qty} using Qty-keyword pattern (backward): ${qtyLine.trim()}`);
           break;
         }
       }
 
-      // Pattern 5b: More flexible - find any number that appears before ₹ (even with text in between)
-      // This catches cases like "Product Name 2 ₹100" where there might be spaces or text
-      // Split by ₹ and look for numbers in the part before ₹
-      const partsBeforeRupee = qtyLine.split('₹');
-      if (partsBeforeRupee.length > 1) {
-        const beforeRupee = partsBeforeRupee[0];
-        // Look for numbers at the end of the text before ₹ (most likely to be quantity)
-        const numbersBeforeRupee = beforeRupee.match(/(\d+)(?:\s*₹|$)/);
-        if (numbersBeforeRupee) {
-          const potentialQty = parseInt(numbersBeforeRupee[1], 10);
-          // Validate: reasonable quantity, not a tax percentage, not HSN
-          if (
-            potentialQty >= 1 &&
-            potentialQty <= 100 &&
-            !qtyLine.match(new RegExp(`\\b${potentialQty}%`)) &&
-            !qtyLine.toUpperCase().includes('HSN') &&
-            // Make sure it's not part of a larger number or price
-            !beforeRupee.match(new RegExp(`₹[\\d,]+.*?${potentialQty}`))
-          ) {
-            qty = potentialQty;
-            console.log(`[Quantity Extraction] Found qty ${qty} using flexible qty-before-price pattern: ${qtyLine.trim()}`);
-            break;
-          }
+      // Pattern 2
+      const priceBothSidesMatch = qtyLine.match(/₹[\d,.]+\s+(\d+)\s+₹[\d,.]+/);
+      if (priceBothSidesMatch) {
+        const potentialQty = parseInt(priceBothSidesMatch[1], 10);
+        if (potentialQty >= 1 && potentialQty <= 100) {
+          qty = potentialQty;
+          console.log(`[Quantity Extraction] Found qty ${qty} using price-both-sides pattern (backward): ${qtyLine.trim()}`);
+          break;
         }
       }
-    }
 
-    // Pattern 6: Fallback - Look for any standalone number (1-100) in line with ₹, not at start
-    // This is a last resort to catch quantities that other patterns missed
-    if (qtyLine.includes('₹') && qty === 1) {
-      // Split line by whitespace and look for numbers
-      const words = qtyLine.trim().split(/\s+/);
-      for (let wordIdx = 0; wordIdx < words.length; wordIdx++) {
-        const word = words[wordIdx];
-        // Check if word is a pure number
-        if (/^\d+$/.test(word)) {
-          const potentialQty = parseInt(word, 10);
-          // Check if next word starts with ₹ (indicates quantity column)
-          const nextWord = wordIdx < words.length - 1 ? words[wordIdx + 1] : '';
-          if (
-            potentialQty >= 1 &&
-            potentialQty <= 100 &&
-            nextWord.startsWith('₹') &&
-            !qtyLine.match(new RegExp(`\\b${potentialQty}%`)) &&
-            !qtyLine.toUpperCase().includes('HSN')
-          ) {
-            qty = potentialQty;
-            console.log(`[Quantity Extraction] Found qty ${qty} using fallback pattern (word split): ${qtyLine.trim()}`);
-            break;
-          }
+      // Pattern 3
+      const priceMatch = qtyLine.trim().match(/^(\d+)\s+₹[\d,]+\.?\d*\s+\d+%?\s*(IGST|CGST|SGST)/i);
+      if (priceMatch) {
+        const potentialQty = parseInt(priceMatch[1], 10);
+        if (potentialQty >= 1 && potentialQty <= 100) {
+          qty = potentialQty;
+          console.log(`[Quantity Extraction] Found qty ${qty} using qty-price-tax pattern (backward): ${qtyLine.trim()}`);
+          break;
         }
       }
-      if (qty !== 1) {
-        break; // Found quantity, exit loop
+
+      // Pattern 4
+      const standaloneMatchStart = qtyLine.trim().match(/^(\d+)/);
+      if (standaloneMatchStart) {
+        const potentialQty = parseInt(standaloneMatchStart[1], 10);
+        if (
+          potentialQty >= 1 &&
+          potentialQty <= 100 &&
+          !qtyLine.trim().match(/^\d+(\.\d+)?%/) &&
+          !qtyLineUpper.includes('HSN') &&
+          qtyLine.includes('₹')
+        ) {
+          qty = potentialQty;
+          console.log(`[Quantity Extraction] Found qty ${qty} using standalone-start pattern (backward): ${qtyLine.trim()}`);
+          break;
+        }
       }
     }
   }
 
-  console.log(`[QTY DEBUG] ASIN: ${asin} | Qty: ${qty} | Lines in window: ${searchRange - startIndex} | File: ${fileName}`);
+  console.log(`[QTY DEBUG] ASIN: ${asin} | Qty: ${qty} | Lines in window: ${maxSearchRange - startIndex} | File: ${fileName}`);
   return qty;
 };
 
@@ -510,37 +496,29 @@ export const processPdfInvoices = async (
       const pdfBytesCopy = pdfBytes.slice();
       allPdfBytes.push(pdfBytesCopy);
 
-      // Use the original for pdf.js (it may detach this, but we have the copy stored)
-      const loadingTask = pdfjsLib.getDocument({ data: pdfBytes });
-      const pdf = await loadingTask.promise;
+      // Use MuPDF (WebAssembly) for text extraction — same engine as PyMuPDF (Streamlit).
+      // This gives identical line grouping: full table rows on one line, ASIN and qty together.
+      const mupdf = await import('mupdf');
+      const mupdfDoc = mupdf.Document.openDocument(pdfBytes, "application/pdf");
+      const numPages = mupdfDoc.countPages();
 
-      console.log(`[PDF Processing] Loaded PDF: ${file.name}, Pages: ${pdf.numPages}`);
+      console.log(`[PDF Processing] Loaded PDF: ${file.name}, Pages: ${numPages}`);
 
       const pagesText: string[][] = [];
       const pageTypes: ('invoice' | 'shipping' | 'unknown')[] = [];
       const pageNumberInfos: ({ current: number; total: number } | null)[] = [];
       let previousPageNumberInfo: { current: number; total: number } | null = null;
 
-      // Extract text from all pages
-      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-        const page = await pdf.getPage(pageNum);
-        const textContent = await page.getTextContent();
-        // Group text items by Y-coordinate (±3px tolerance) to reconstruct visual lines
-        const itemsByY = new Map<number, string[]>();
-        for (const item of textContent.items as any[]) {
-          const y = Math.round(item.transform[5] / 3) * 3; // round to nearest 3px
-          if (!itemsByY.has(y)) itemsByY.set(y, []);
-          if (item.str.trim()) itemsByY.get(y)!.push(item.str.trim());
-        }
-        const pageText = Array.from(itemsByY.entries())
-          .sort((a, b) => b[0] - a[0]) // PDF Y-axis is inverted (bottom=0), sort top-to-bottom
-          .map(([_, tokens]) => tokens.join(' ').trim())
-          .filter(line => line.length > 0);
+      // Extract text from all pages using MuPDF structured text
+      for (let pageNum = 0; pageNum < numPages; pageNum++) {
+        const page = mupdfDoc.loadPage(pageNum);
+        const stext = page.toStructuredText("preserve-whitespace");
+        const pageText = stext.asText().split('\n').filter((line: string) => line.trim().length > 0);
         pagesText.push(pageText);
 
         // Log text extraction for debugging (first 200 chars only)
         const pageTextPreview = pageText.join(' ').substring(0, 200);
-        console.debug(`[PDF Processing] Page ${pageNum} text preview (first 200 chars): ${pageTextPreview}...`);
+        console.debug(`[PDF Processing] Page ${pageNum + 1} text preview (first 200 chars): ${pageTextPreview}...`);
 
         // Page-level classification
         // Match Streamlit: Simple check for DESCRIPTION + QTY/QUANTITY
@@ -557,10 +535,6 @@ export const processPdfInvoices = async (
           };
           console.log(`[PDF Processing] Page ${pageNum} has pagination: Page ${pageNumberInfo.current} of ${pageNumberInfo.total}`);
         }
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/f9d5258d-40fb-4cdc-8a84-7e82a4a6abdf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'pdfProcessor.ts:pageClassify', message: 'Page classification input', data: { file: file.name, pageNum, hasPageNumberInfo: !!pageNumberInfo, pageNumberInfo, previousPageNumberInfo, prevPageType: pageNum > 1 ? pageTypes[pageNum - 2] : null }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => { });
-        // #endregion
-
         const isInvoicePage =
           pageTextCombined.includes('DESCRIPTION') &&
           (pageTextCombined.includes('QTY') || pageTextCombined.includes('QUANTITY'));
@@ -595,9 +569,6 @@ export const processPdfInvoices = async (
               pageNumberInfo.total === previousPageNumberInfo.total;
 
             if (isPaginationSequence) {
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/f9d5258d-40fb-4cdc-8a84-7e82a4a6abdf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'pdfProcessor.ts:strategy1', message: 'Strategy 1 fired', data: { file: file.name, pageNum, pageNumberInfo }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => { });
-              // #endregion
               pageType = 'invoice';
               globalInvoicePageCount++;
               console.log(`[PDF Processing] Page ${pageNum} identified as invoice continuation via page numbering (Page ${pageNumberInfo.current} of ${pageNumberInfo.total})`);
@@ -611,9 +582,6 @@ export const processPdfInvoices = async (
           // Strategy 2: Multi-page invoice without products (payment/summary pages)
           // Previous page was invoice AND current has page numbering (even if no products)
           if (prevPageType === 'invoice' && pageNumberInfo && pageNumberInfo.current > 1) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/f9d5258d-40fb-4cdc-8a84-7e82a4a6abdf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'pdfProcessor.ts:strategy2', message: 'Strategy 2 fired', data: { file: file.name, pageNum, pageNumberInfo }, timestamp: Date.now(), hypothesisId: 'B' }) }).catch(() => { });
-            // #endregion
             pageType = 'invoice';
             globalInvoicePageCount++;
             console.log(`[PDF Processing] Page ${pageNum} identified as invoice continuation via page numbering only (Page ${pageNumberInfo.current} of ${pageNumberInfo.total}, no products)`);
@@ -623,16 +591,19 @@ export const processPdfInvoices = async (
             continue;
           }
 
-          // Strategy 3: Previous page + product indicators (existing logic)
-          const hasProductIndicators =
+          // Strategy 3: Previous page + invoice-specific tax/HSN indicators ONLY.
+          // IMPORTANT: We deliberately exclude '₹' and bare ASIN presence.
+          // Amazon shipping labels contain '₹' (MRP sticker) and the product ASIN,
+          // but they do NOT contain GST tax columns (IGST/CGST/SGST) or HSN codes.
+          // Only real invoice continuation pages carry those tax/HSN markers.
+          const hasInvoiceIndicators =
             pageTextCombined.includes('HSN') ||
-            pageTextCombined.includes('₹') ||
             pageTextCombined.includes('IGST') ||
             pageTextCombined.includes('CGST') ||
             pageTextCombined.includes('SGST');
-          const hasASINs = /\b(B[0-9A-Z]{9})\b/.test(pageTextCombined);
 
           // Strategy 4: Has TOTAL but no new invoice header (end of multi-page invoice)
+          // Also require invoice indicators to avoid triggering on shipping label "TOTAL MRP" text
           const hasTOTAL = pageTextCombined.includes('TOTAL');
           const hasNewInvoiceHeader = pageTextCombined.includes('INVOICE NO') ||
             pageTextCombined.includes('TAX INVOICE');
@@ -644,14 +615,14 @@ export const processPdfInvoices = async (
 
           const isContinuation =
             (prevPageType === 'invoice' && !isInvoicePage && !isShippingLabelPage &&
-              (hasProductIndicators || hasASINs)) ||
-            (hasTOTAL && !hasNewInvoiceHeader && prevPageType === 'invoice') ||
+              hasInvoiceIndicators) ||
+            (hasTOTAL && !hasNewInvoiceHeader && prevPageType === 'invoice' && hasInvoiceIndicators) ||
             hasContinuationMarkers;
 
           if (isContinuation) {
             pageType = 'invoice';
             globalInvoicePageCount++;
-            console.log(`[PDF Processing] Page ${pageNum} identified as continuation (strategy: ${hasContinuationMarkers ? 'markers' : hasProductIndicators ? 'products' : 'TOTAL'})`);
+            console.log(`[PDF Processing] Page ${pageNum} identified as continuation (strategy: ${hasContinuationMarkers ? 'markers' : hasInvoiceIndicators ? 'invoiceIndicators' : 'TOTAL'})`);
           }
         }
 
@@ -659,9 +630,6 @@ export const processPdfInvoices = async (
         previousPageNumberInfo = pageNumberInfo;
         pageNumberInfos.push(pageNumberInfo);
         pageTypes.push(pageType);
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/f9d5258d-40fb-4cdc-8a84-7e82a4a6abdf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'pdfProcessor.ts:pageTypeFinal', message: 'Final page type', data: { file: file.name, pageNum, pageType }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => { });
-        // #endregion
 
         if (isInvoicePage) {
           totalInvoices++;
@@ -731,9 +699,13 @@ export const processPdfInvoices = async (
         const lines = pagesText[pageIndex];
         const pageType = pageTypes[pageIndex] ?? 'unknown';
 
-        // Match Streamlit: Process ALL pages, don't skip shipping pages
-        // Let validation handle filtering instead of skipping pages entirely
-        // Removed: if (pageType === 'shipping') { continue; }
+        // Only process invoice pages — skip shipping label pages entirely.
+        // pdf.js extracts text from shipping label elements (product details, barcodes)
+        // that PyMuPDF ignores, causing each ASIN to be found on both the shipping page
+        // AND the invoice page, doubling the count.
+        if (pageType === 'shipping') {
+          continue;
+        }
 
         // Detect if this is a continuation page (multi-page invoice)
         // Continuation pages: previous page was invoice, current page has products but no DESCRIPTION
@@ -756,9 +728,12 @@ export const processPdfInvoices = async (
         let pageRejectedCount = 0;
         let pageAsinsFound = 0;
 
-        // We intentionally do NOT track table state here; that logic lives
-        // entirely inside validateASINContext so there is a single source
-        // of truth for context decisions.
+        // Per-page deduplication: pdf.js Y-coordinate grouping can place the same ASIN
+        // on multiple reconstructed lines when invoice structures vary (different header
+        // sizes, table heights). PyMuPDF (Streamlit) reads each ASIN once per page.
+        // We replicate that by accepting each ASIN at most once per PDF page.
+        const seenAsinsOnPage = new Set<string>();
+
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i];
 
@@ -771,6 +746,13 @@ export const processPdfInvoices = async (
           for (const asin of asins) {
             asinExtractionAttempts++;
             globalAsinAttempts++;
+
+            // Skip if this ASIN was already accepted on this page (pdf.js duplicate extraction)
+            if (seenAsinsOnPage.has(asin)) {
+              console.debug(`[PDF Processing] Skipping duplicate ASIN on same page: ${asin}, Page ${pageIndex + 1}, Line ${i}`);
+              continue;
+            }
+
             const validationResult = validateASINContext(
               line, i, lines, asin, isContinuationPage,
               file.name, pageIndex + 1, rejectedAsins
@@ -785,6 +767,7 @@ export const processPdfInvoices = async (
             // Match Streamlit: Add ASIN immediately if valid OR if ambiguous (not in address)
             if (validationResult.valid) {
               // Valid ASIN (in invoice table or has product context) - add immediately
+              seenAsinsOnPage.add(asin);
               const qty = extractQuantity(
                 line, lines, i,
                 asin, file.name, pageIndex + 1, quantityDefaults
@@ -807,8 +790,7 @@ export const processPdfInvoices = async (
               console.log(`[PDF Processing]   Line content: "${linePreview}"`);
             } else if (!validationResult.isInAddress) {
               // Ambiguous ASIN (not in address, but no clear context) - accept as fallback
-              // Match Streamlit: `if not is_in_address and best_asin is None: accept ambiguous ASIN`
-              // For packing plan, accept ALL ambiguous ASINs (not just one)
+              seenAsinsOnPage.add(asin);
               const qty = extractQuantity(
                 line, lines, i,
                 asin, file.name, pageIndex + 1, quantityDefaults
@@ -834,9 +816,6 @@ export const processPdfInvoices = async (
               asinContextRejections++;
               globalAsinRejectedByContext++;
               pageRejectedCount++;
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/f9d5258d-40fb-4cdc-8a84-7e82a4a6abdf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'pdfProcessor.ts:asinRejected', message: 'ASIN rejected', data: { file: file.name, asin, pageIndex: pageIndex + 1, lineIndex: i, reason: validationResult.reason, isContinuationPage }, timestamp: Date.now(), hypothesisId: 'C' }) }).catch(() => { });
-              // #endregion
               // Log detailed rejection reason with context
               const contextLines = lines.slice(Math.max(0, i - 2), Math.min(lines.length, i + 2));
               console.warn(`[PDF Processing] ✗ REJECTED ASIN: ${asin} from file: ${file.name}`, {
@@ -884,10 +863,6 @@ export const processPdfInvoices = async (
 
       // Log extraction statistics for this file
       console.log(`[PDF Processing] File: ${file.name} - ASIN extraction attempts: ${asinExtractionAttempts}, successful: ${asinExtractionSuccesses}, rejected by context: ${asinContextRejections}`);
-      // #region agent log
-      const extractedQtySoFar = Array.from(asinQtyData.values()).reduce((a, b) => a + b, 0);
-      fetch('http://127.0.0.1:7242/ingest/f9d5258d-40fb-4cdc-8a84-7e82a4a6abdf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'pdfProcessor.ts:fileSummary', message: 'After file extraction', data: { file: file.name, pageTypes, extractedQtySoFar, asinCount: asinQtyData.size }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => { });
-      // #endregion
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(`[PDF Processing] Error processing file ${file.name}:`, error);

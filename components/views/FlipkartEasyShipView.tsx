@@ -1,5 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { Upload, FileText, Download, AlertCircle, Package, Loader2, BarChart3, TrendingUp } from 'lucide-react';
+import DownloadButton from '../../components/DownloadButton';
 import { processFlipkartFile, ProcessedOrder, detectMultiItemOrders, applyProductNameMapping, createProductNameMapping } from '../../services/excelProcessor';
 import { generateReportPDF, generateReportExcel, GroupingStyle, Orientation } from '../../services/reportGenerator';
 import { MasterProduct } from '../../types';
@@ -141,262 +142,185 @@ const FlipkartEasyShipView: React.FC<FlipkartEasyShipViewProps> = ({ masterData 
   }, [excelBlob, processedOrders.length]);
 
   return (
-    <div className="w-full max-w-7xl mx-auto space-y-6">
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-        <h2 className="text-2xl font-bold text-gray-900 mb-2">Flipkart Order Report Generator</h2>
-        <p className="text-gray-600">Upload your Flipkart Excel or CSV file to generate packing reports</p>
-      </div>
+    <div className="w-full max-w-7xl mx-auto space-y-4">
 
-      {/* File Upload Section */}
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 animate-slideIn">
-        <FileUploadZone
-          onFilesSelected={handleFilesSelected}
-          accept=".xlsx,.xls,.csv"
-          multiple={false}
-          maxSizeMB={50}
-          disabled={isProcessing}
-          label="Upload Excel or CSV File"
-          description="Excel or CSV files up to 50MB"
-        />
-        
-        {isProcessing && (
-          <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-            <ProgressBar
-              progress={processingProgress * 100}
-              label="Processing file..."
-              showPercentage={true}
-              size="md"
-              color="blue"
-              animated={true}
+      {/* Upload + Stats row */}
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+        <div className="flex items-start gap-4">
+          {/* Upload zone - compact */}
+          <div className="flex-1 min-w-0">
+            <FileUploadZone
+              onFilesSelected={handleFilesSelected}
+              accept=".xlsx,.xls,.csv"
+              multiple={false}
+              maxSizeMB={50}
+              disabled={isProcessing}
+              label="Upload Excel or CSV File"
+              description="Excel or CSV files up to 50MB"
             />
-          </div>
-        )}
-
-        {uploadedFile && !isProcessing && (
-          <p className="text-sm text-gray-700 mt-2">
-            <FileText className="inline h-4 w-4 mr-1" />
-            {uploadedFile.name}
-          </p>
-        )}
-      </div>
-
-      {/* Order Analysis */}
-      {multiItemStats && processedOrders.length > 0 && (
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Order Analysis</h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="bg-gray-50 rounded-lg p-4">
-              <div className="flex items-center">
-                <Package className="h-5 w-5 text-gray-400 mr-2" />
-                <div>
-                  <p className="text-sm text-gray-600">Total Orders</p>
-                  <p className="text-2xl font-bold text-gray-900">{multiItemStats.totalOrders}</p>
-                </div>
+            {isProcessing && (
+              <div className="mt-3">
+                <ProgressBar
+                  progress={processingProgress * 100}
+                  label="Processing file..."
+                  showPercentage={true}
+                  size="sm"
+                  color="blue"
+                  animated={true}
+                />
               </div>
-            </div>
-            <div className="bg-yellow-50 rounded-lg p-4">
-              <div className="flex items-center">
-                <BarChart3 className="h-5 w-5 text-yellow-400 mr-2" />
-                <div>
-                  <p className="text-sm text-gray-600">Multi-Item Orders</p>
-                  <p className="text-2xl font-bold text-yellow-700">{multiItemStats.multiItemCount}</p>
-                </div>
-              </div>
-            </div>
-            <div className={`rounded-lg p-4 ${
-              multiItemStats.riskLevel === 'High' ? 'bg-red-50' :
-              multiItemStats.riskLevel === 'Medium' ? 'bg-orange-50' :
-              'bg-green-50'
-            }`}>
-              <div className="flex items-center">
-                <TrendingUp className={`h-5 w-5 mr-2 ${
-                  multiItemStats.riskLevel === 'High' ? 'text-red-400' :
-                  multiItemStats.riskLevel === 'Medium' ? 'text-orange-400' :
-                  'text-green-400'
-                }`} />
-                <div>
-                  <p className="text-sm text-gray-600">Risk Level</p>
-                  <p className={`text-2xl font-bold ${
-                    multiItemStats.riskLevel === 'High' ? 'text-red-700' :
-                    multiItemStats.riskLevel === 'Medium' ? 'text-orange-700' :
-                    'text-green-700'
-                  }`}>
-                    {multiItemStats.riskLevel}
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {multiItemStats.multiItemCount > 0 && (
-            <div className="mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-md">
-              <p className="text-sm text-yellow-800">
-                <strong>{multiItemStats.multiItemCount}</strong> orders contain multiple items - require complete packing
+            )}
+            {uploadedFile && !isProcessing && (
+              <p className="mt-2 text-xs text-gray-500 flex items-center gap-1">
+                <FileText className="h-3.5 w-3.5" />
+                {uploadedFile.name}
               </p>
+            )}
+          </div>
+
+          {/* Stats — shown inline once processed */}
+          {multiItemStats && processedOrders.length > 0 && (
+            <div className="flex flex-col gap-2 shrink-0 w-52">
+              <div className="flex items-center justify-between bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <Package className="h-4 w-4 text-gray-400" />
+                  <span className="text-xs text-gray-500">Total Orders</span>
+                </div>
+                <span className="text-sm font-bold text-gray-900">{multiItemStats.totalOrders}</span>
+              </div>
+              <div className="flex items-center justify-between bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <BarChart3 className="h-4 w-4 text-amber-400" />
+                  <span className="text-xs text-gray-500">Multi-Item</span>
+                </div>
+                <span className="text-sm font-bold text-amber-700">{multiItemStats.multiItemCount}</span>
+              </div>
+              <div className={`flex items-center justify-between rounded-lg px-3 py-2 border ${
+                multiItemStats.riskLevel === 'High' ? 'bg-red-50 border-red-200' :
+                multiItemStats.riskLevel === 'Medium' ? 'bg-orange-50 border-orange-200' :
+                'bg-green-50 border-green-200'
+              }`}>
+                <div className="flex items-center gap-2">
+                  <TrendingUp className={`h-4 w-4 ${
+                    multiItemStats.riskLevel === 'High' ? 'text-red-400' :
+                    multiItemStats.riskLevel === 'Medium' ? 'text-orange-400' :
+                    'text-green-400'
+                  }`} />
+                  <span className="text-xs text-gray-500">Risk</span>
+                </div>
+                <span className={`text-sm font-bold ${
+                  multiItemStats.riskLevel === 'High' ? 'text-red-700' :
+                  multiItemStats.riskLevel === 'Medium' ? 'text-orange-700' :
+                  'text-green-700'
+                }`}>{multiItemStats.riskLevel}</span>
+              </div>
             </div>
           )}
         </div>
-      )}
+      </div>
 
-      {/* Report Generation Options */}
+      {/* Report Generation — compact single card */}
       {processedOrders.length > 0 && (
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 space-y-6">
-          <h3 className="text-lg font-semibold text-gray-900">Report Generation</h3>
-
-          {/* Grouping Style */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Report Grouping Style
-            </label>
-            <div className="space-y-2">
-              {([
-                'By Product Only (Current Method)',
-                'Multi-Item First, Then By Product (Recommended)',
-                'By Product with Multi-Item Warnings'
-              ] as GroupingStyle[]).map((style) => (
-                <label key={style} className="flex items-center">
-                  <input
-                    type="radio"
-                    name="grouping-style"
-                    value={style}
-                    checked={groupingStyle === style}
-                    onChange={(e) => setGroupingStyle(e.target.value as GroupingStyle)}
-                    className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
-                  />
-                  <span className="ml-2 text-sm text-gray-700">{style}</span>
-                </label>
-              ))}
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+          <div className="flex items-center justify-between flex-wrap gap-4">
+            {/* Orientation toggle */}
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-medium text-gray-700">Orientation:</span>
+              <div className="flex gap-1 bg-gray-100 rounded-lg p-0.5">
+                {(['Portrait', 'Landscape'] as Orientation[]).map((orient) => (
+                  <button
+                    key={orient}
+                    onClick={() => setOrientation(orient)}
+                    className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+                      orientation === orient
+                        ? 'bg-white text-gray-900 shadow-sm'
+                        : 'text-gray-500 hover:text-gray-700'
+                    }`}
+                  >
+                    {orient}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
 
-          {/* Orientation */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Page Orientation
-            </label>
-            <div className="flex space-x-4">
-              {(['Portrait', 'Landscape'] as Orientation[]).map((orient) => (
-                <label key={orient} className="flex items-center">
-                  <input
-                    type="radio"
-                    name="orientation"
-                    value={orient}
-                    checked={orientation === orient}
-                    onChange={(e) => setOrientation(e.target.value as Orientation)}
-                    className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
-                  />
-                  <span className="ml-2 text-sm text-gray-700">{orient}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-
-          {/* Generate Buttons */}
-          <div className="flex space-x-4">
-            <button
-              onClick={handleGeneratePDF}
-              disabled={isProcessing}
-              className="flex-1 bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center"
-            >
-              {isProcessing ? (
-                <>
-                  <Loader2 className="animate-spin h-5 w-5 mr-2" />
-                  Generating...
-                </>
-              ) : (
-                <>
-                  <FileText className="h-5 w-5 mr-2" />
-                  Generate PDF Report
-                </>
+            {/* Action buttons */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleGeneratePDF}
+                disabled={isProcessing}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {isProcessing ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
+                Generate PDF
+              </button>
+              <button
+                onClick={handleGenerateExcel}
+                disabled={isProcessing}
+                className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <Download className="h-4 w-4" />
+                Generate Excel
+              </button>
+              {pdfBytes && (
+                <DownloadButton
+                  onDownload={handleDownloadPDF}
+                  tickSize="h-4 w-4"
+                  className="flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 border border-blue-200 text-sm font-medium rounded-lg hover:bg-blue-100 transition-colors"
+                >
+                  <Download className="h-4 w-4" />
+                  Download PDF
+                </DownloadButton>
               )}
-            </button>
-            <button
-              onClick={handleGenerateExcel}
-              disabled={isProcessing}
-              className="flex-1 bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center"
-            >
-              <Download className="h-5 w-5 mr-2" />
-              Generate Excel Export
-            </button>
+              {excelBlob && (
+                <DownloadButton
+                  onDownload={handleDownloadExcel}
+                  tickSize="h-4 w-4"
+                  className="flex items-center gap-2 px-4 py-2 bg-green-50 text-green-700 border border-green-200 text-sm font-medium rounded-lg hover:bg-green-100 transition-colors"
+                >
+                  <Download className="h-4 w-4" />
+                  Download Excel
+                </DownloadButton>
+              )}
+            </div>
           </div>
-
-          {/* Download Buttons */}
-          {pdfBytes && (
-            <button
-              onClick={handleDownloadPDF}
-              className="w-full bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 flex items-center justify-center"
-            >
-              <Download className="h-5 w-5 mr-2" />
-              Download PDF Report
-            </button>
-          )}
-
-          {excelBlob && (
-            <button
-              onClick={handleDownloadExcel}
-              className="w-full bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 flex items-center justify-center"
-            >
-              <Download className="h-5 w-5 mr-2" />
-              Download Excel File
-            </button>
+          {multiItemStats && multiItemStats.multiItemCount > 0 && (
+            <p className="mt-3 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-1.5">
+              <strong>{multiItemStats.multiItemCount}</strong> orders contain multiple items — require complete packing
+            </p>
           )}
         </div>
       )}
 
       {/* Preview Data */}
       {processedOrders.length > 0 && (
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Preview Processed Data</h3>
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200">
+          <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-800">Orders Preview</h3>
+            {processedOrders.length > 20 && (
+              <span className="text-xs text-gray-400">Showing 20 of {processedOrders.length}</span>
+            )}
+          </div>
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
+            <table className="min-w-full divide-y divide-gray-100">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Tracking ID
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    SKU
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Product Name
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Qty
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Dispatch Date
-                  </th>
+                  {['Tracking ID', 'SKU', 'Product Name', 'Qty', 'Dispatch Date'].map(h => (
+                    <th key={h} className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{h}</th>
+                  ))}
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody className="divide-y divide-gray-100">
                 {processedOrders.slice(0, 20).map((order, idx) => (
-                  <tr key={idx} className={order.highlight ? 'bg-yellow-50' : ''}>
-                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
-                      {order['tracking-id']}
-                    </td>
-                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
-                      {order.sku}
-                    </td>
-                    <td className="px-4 py-3 text-sm text-gray-900">
-                      {order['product-name']}
-                    </td>
-                    <td className={`px-4 py-3 whitespace-nowrap text-sm font-semibold ${
-                      order.highlight ? 'text-red-600' : 'text-gray-900'
-                    }`}>
-                      {order.qty}
-                    </td>
-                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
-                      {order['pickup-slot']}
-                    </td>
+                  <tr key={idx} className={order.highlight ? 'bg-yellow-50' : 'hover:bg-gray-50'}>
+                    <td className="px-4 py-2 whitespace-nowrap text-xs text-gray-700">{order['tracking-id']}</td>
+                    <td className="px-4 py-2 whitespace-nowrap text-xs text-gray-700">{order.sku}</td>
+                    <td className="px-4 py-2 text-xs text-gray-700">{order['product-name']}</td>
+                    <td className={`px-4 py-2 whitespace-nowrap text-xs font-semibold ${order.highlight ? 'text-red-600' : 'text-gray-900'}`}>{order.qty}</td>
+                    <td className="px-4 py-2 whitespace-nowrap text-xs text-gray-700">{order['pickup-slot']}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-            {processedOrders.length > 20 && (
-              <p className="mt-2 text-sm text-gray-500 text-center">
-                Showing first 20 of {processedOrders.length} orders
-              </p>
-            )}
           </div>
         </div>
       )}

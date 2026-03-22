@@ -19,6 +19,7 @@ export interface FlipkartExtractionResult {
 export interface FlipkartPDFProcessingResult {
   skuQtyData: Map<string, number>;
   totalInvoices: number;
+  multiQtyInvoices: number; // Count of invoices with at least one item with qty > 1
   extractionResults: FlipkartExtractionResult[];
   failedPdfCount?: number;
   allPdfBytes?: Uint8Array[]; // Store PDF bytes for sorting
@@ -401,6 +402,7 @@ export const processFlipkartPdfInvoices = async (
 ): Promise<FlipkartPDFProcessingResult> => {
   const skuQtyData = new Map<string, number>();
   let totalInvoices = 0;
+  let multiQtyInvoices = 0;
   const extractionResults: FlipkartExtractionResult[] = [];
   let failedPdfCount = 0;
   const allPdfBytes: Uint8Array[] = []; // Store PDF bytes for sorting
@@ -435,6 +437,11 @@ export const processFlipkartPdfInvoices = async (
         if (hasSkuId && (hasDescription || hasQty)) {
           invoiceCount++;
           console.debug(`[Flipkart PDF] Page ${pageNum} identified as invoice page`);
+          // Check if any item on this invoice page has qty > 1
+          const pageProducts = extractSkuFromPage(pageText);
+          if (pageProducts.some(p => p.qty > 1)) {
+            multiQtyInvoices++;
+          }
         }
       }
 
@@ -477,6 +484,7 @@ export const processFlipkartPdfInvoices = async (
   return {
     skuQtyData,
     totalInvoices,
+    multiQtyInvoices,
     extractionResults,
     failedPdfCount: failedPdfCount > 0 ? failedPdfCount : undefined,
     allPdfBytes: allPdfBytes.length > 0 ? allPdfBytes : undefined

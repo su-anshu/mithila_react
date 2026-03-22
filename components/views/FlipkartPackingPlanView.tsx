@@ -1,11 +1,15 @@
 import React, { useState, useCallback, useMemo } from 'react';
+import { useAdmin } from '../../contexts/AdminContext';
 import { Upload, FileText, Download, Tag, AlertCircle, Package, Loader2, X } from 'lucide-react';
 import { MasterProduct, NutritionData, PhysicalItem, MissingProduct, ProcessingStats } from '../../types';
 import { processFlipkartPdfInvoices } from '../../services/flipkartPdfProcessor';
 import { expandToPhysicalFlipkart } from '../../services/flipkartPackingPlanProcessor';
+import { getProductFromFkSku } from '../../services/flipkartProductMatcher';
+import { parseSkuId } from '../../services/flipkartUtils';
+import { reformatLabelsTo4x6Vertical } from '../../services/labelFormatter';
 import { generateSummaryPdf } from '../../services/packingPlanPdfGenerator';
 import { sortPdfBySkuFlipkart } from '../../services/flipkartSortedPdfGenerator';
-import { generateLabelsByPacketUsed, generateMRPOnlyLabels } from '../../services/packingPlanLabelGenerator';
+import { generateLabelsByPacketUsed, generateMRPOnlyLabels, generateCombinedVerticalLabels } from '../../services/packingPlanLabelGenerator';
 import { generateProductLabelsPdf } from '../../services/productLabelGenerator';
 import { shouldIncludeProductLabel } from '../../services/utils';
 import { downloadExcel } from '../../services/excelExporter';
@@ -17,6 +21,8 @@ import ProgressSteps from '../../components/ProgressSteps';
 import EmptyState from '../../components/EmptyState';
 import SkeletonTable from '../../components/SkeletonTable';
 import FileUploadZone from '../../components/FileUploadZone';
+import BrandWiseLabels from '../../components/BrandWiseLabels';
+import DownloadButton from '../../components/DownloadButton';
 
 /**
  * Generate hash from physical items data for caching
@@ -56,9 +62,48 @@ interface FlipkartOrderItem {
   [key: string]: any;
 }
 
+interface EnrichedFlipkartOrder {
+  Item: string;
+  Weight: string;
+  Qty: number;
+  'Packet Size': string;
+  'SKU ID': string;
+}
+
+const enrichFlipkartOrders = (
+  orders: FlipkartOrderItem[],
+  masterData: MasterProduct[]
+): EnrichedFlipkartOrder[] => {
+  return orders.map(order => {
+    const sku = order.SKU;
+    const qty = order.Qty;
+    const matches = getProductFromFkSku(sku, masterData);
+    if (matches.length > 0) {
+      const match = matches[0];
+      const packetSize = match['Packet Size'] || match['PacketSize'] || 'N/A';
+      return {
+        Item: String(match.Name || ''),
+        Weight: String(match['Net Weight'] || ''),
+        Qty: qty,
+        'Packet Size': String(packetSize),
+        'SKU ID': sku
+      };
+    }
+    const parsed = parseSkuId(sku);
+    return {
+      Item: parsed.productName || sku,
+      Weight: parsed.weight || '',
+      Qty: qty,
+      'Packet Size': 'N/A',
+      'SKU ID': sku
+    };
+  });
+};
+
 const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ masterData, nutritionData }) => {
   const { showSuccess, showError, showInfo } = useToast();
   const confirm = useConfirm();
+  const { flags } = useAdmin();
   
   const [pdfFiles, setPdfFiles] = useState<File[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -67,6 +112,7 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
   const [processingComplete, setProcessingComplete] = useState(false);
   
   const [orders, setOrders] = useState<FlipkartOrderItem[]>([]);
+  const [enrichedOrders, setEnrichedOrders] = useState<EnrichedFlipkartOrder[]>([]);
   const [physicalItems, setPhysicalItems] = useState<PhysicalItem[]>([]);
   const [missingProducts, setMissingProducts] = useState<MissingProduct[]>([]);
   const [stats, setStats] = useState<ProcessingStats>({
@@ -100,7 +146,7 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
   
   // Product labels state
   const [productLabelPdfBytes, setProductLabelPdfBytes] = useState<Uint8Array | null>(null);
-  const [productLabelPdfBytesWithDate, setProductLabelPdfBytesWithDate] = useState<Uint8Array | null>(null);
+  const [productLabel50x25PdfBytes, setProductLabel50x25PdfBytes] = useState<Uint8Array | null>(null);
   const [productLabelCount, setProductLabelCount] = useState(0);
   const [isGeneratingProductLabels, setIsGeneratingProductLabels] = useState(false);
   
@@ -108,20 +154,32 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
   const [mrpPdfBytes, setMrpPdfBytes] = useState<Uint8Array | null>(null);
   const [mrpCount, setMrpCount] = useState(0);
   const [isGeneratingMrpLabels, setIsGeneratingMrpLabels] = useState(false);
+
+  // Combined Vertical Sticker labels state
+  const [combinedVerticalPdfBytes, setCombinedVerticalPdfBytes] = useState<Uint8Array | null>(null);
+  const [combinedVerticalCount, setCombinedVerticalCount] = useState(0);
+  const [isGeneratingCombinedVertical, setIsGeneratingCombinedVertical] = useState(false);
+  const [cachedCombinedVerticalPdfBytes, setCachedCombinedVerticalPdfBytes] = useState<Uint8Array | null>(null);
+  const [cachedCombinedVerticalCount, setCachedCombinedVerticalCount] = useState(0);
   
   // Sorted PDF state
   const [sortedPdfBytes, setSortedPdfBytes] = useState<Uint8Array | null>(null);
   const [isGeneratingSortedPdf, setIsGeneratingSortedPdf] = useState(false);
   
+  // House 4x6 vertical labels state
+  const [house4x6PdfBytes, setHouse4x6PdfBytes] = useState<Uint8Array | null>(null);
+  const [isGenerating4x6, setIsGenerating4x6] = useState(false);
+
   // Label caching state
   const [labelCacheHash, setLabelCacheHash] = useState<string | null>(null);
   const [cachedStickerPdfBytes, setCachedStickerPdfBytes] = useState<Uint8Array | null>(null);
   const [cachedHousePdfBytes, setCachedHousePdfBytes] = useState<Uint8Array | null>(null);
+  const [cachedHouse4x6PdfBytes, setCachedHouse4x6PdfBytes] = useState<Uint8Array | null>(null);
   const [cachedStickerCount, setCachedStickerCount] = useState(0);
   const [cachedHouseCount, setCachedHouseCount] = useState(0);
   const [cachedSkippedProducts, setCachedSkippedProducts] = useState<Array<{ Product: string; ASIN: string; 'Packet used': string; Reason: string }>>([]);
   const [cachedProductLabelPdfBytes, setCachedProductLabelPdfBytes] = useState<Uint8Array | null>(null);
-  const [cachedProductLabelPdfBytesWithDate, setCachedProductLabelPdfBytesWithDate] = useState<Uint8Array | null>(null);
+  const [cachedProductLabel50x25PdfBytes, setCachedProductLabel50x25PdfBytes] = useState<Uint8Array | null>(null);
   const [cachedProductLabelCount, setCachedProductLabelCount] = useState(0);
   const [cachedMrpPdfBytes, setCachedMrpPdfBytes] = useState<Uint8Array | null>(null);
   const [cachedMrpCount, setCachedMrpCount] = useState(0);
@@ -236,6 +294,8 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
       });
 
       setOrders(ordersWithMaster);
+      // Build enriched orders with Item, Weight, Packet Size from master data
+      setEnrichedOrders(enrichFlipkartOrders(ordersWithMaster, masterData));
 
       // Expand to physical plan
       setProcessingProgress(0.90);
@@ -256,17 +316,23 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
       setLabelCacheHash(null);
       setCachedStickerPdfBytes(null);
       setCachedHousePdfBytes(null);
+      setCachedHouse4x6PdfBytes(null);
       setCachedStickerCount(0);
       setCachedHouseCount(0);
       setCachedSkippedProducts([]);
       setCachedProductLabelPdfBytes(null);
-      setCachedProductLabelPdfBytesWithDate(null);
+      setCachedProductLabel50x25PdfBytes(null);
       setCachedProductLabelCount(0);
       setCachedMrpPdfBytes(null);
       setCachedMrpCount(0);
-      
-      // Reset sorted PDF
+      setCachedCombinedVerticalPdfBytes(null);
+      setCachedCombinedVerticalCount(0);
+
+      // Reset sorted PDF and 4x6 labels
       setSortedPdfBytes(null);
+      setHouse4x6PdfBytes(null);
+      setCombinedVerticalPdfBytes(null);
+      setCombinedVerticalCount(0);
 
       // Calculate statistics
       const totalQtyOrdered = ordersWithMaster.reduce((sum, o) => sum + (o.Qty || 0), 0);
@@ -274,8 +340,8 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
 
       setStats({
         total_invoices: result.totalInvoices,
-        multi_qty_invoices: 0, // Flipkart doesn't track this the same way
-        single_item_invoices: result.totalInvoices,
+        multi_qty_invoices: result.multiQtyInvoices,
+        single_item_invoices: result.totalInvoices - result.multiQtyInvoices,
         total_qty_ordered: totalQtyOrdered,
         total_qty_physical: totalQtyPhysical
       });
@@ -331,7 +397,7 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
             if (sortedPdf && sortedPdf.length > 0) {
               setSortedPdfBytes(sortedPdf);
               console.log(`[FlipkartPackingPlanView] ✅ Successfully generated sorted PDF: ${sortedPdf.length} bytes`);
-              showInfo('Sorted PDF ready', 'Sorted shipping labels PDF has been generated and is ready to download.');
+              showInfo('PDF ready', 'Highlighted shipping labels PDF has been generated and is ready to download.');
             } else {
               console.error('[FlipkartPackingPlanView] ❌ Failed to generate sorted PDF - sortPdfBySkuFlipkart returned null or empty');
               setSortedPdfBytes(null);
@@ -399,6 +465,7 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
       console.log('[Label Caching] Using cached labels. Hash:', currentDataHash.substring(0, 8));
       setStickerPdfBytes(cachedStickerPdfBytes);
       setHousePdfBytes(cachedHousePdfBytes);
+      setHouse4x6PdfBytes(cachedHouse4x6PdfBytes);
       setStickerCount(cachedStickerCount);
       setHouseCount(cachedHouseCount);
       setSkippedProducts(cachedSkippedProducts);
@@ -410,20 +477,36 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
 
     try {
       const result = await generateLabelsByPacketUsed(physicalItems, masterData, nutritionData);
-      
+
+      // Generate 4x6 vertical format for house labels
+      let house4x6Bytes: Uint8Array | null = null;
+      if (result.housePdfBytes && result.houseCount > 0) {
+        try {
+          setIsGenerating4x6(true);
+          house4x6Bytes = await reformatLabelsTo4x6Vertical(result.housePdfBytes);
+          console.log('[Label Caching] 4x6 vertical labels generated');
+        } catch (err) {
+          console.error('[Label Caching] Error generating 4x6 vertical labels:', err);
+        } finally {
+          setIsGenerating4x6(false);
+        }
+      }
+
       setLabelCacheHash(currentDataHash);
       setCachedStickerPdfBytes(result.stickerPdfBytes);
       setCachedHousePdfBytes(result.housePdfBytes);
+      setCachedHouse4x6PdfBytes(house4x6Bytes);
       setCachedStickerCount(result.stickerCount);
       setCachedHouseCount(result.houseCount);
       setCachedSkippedProducts(result.skippedProducts);
-      
+
       setStickerPdfBytes(result.stickerPdfBytes);
       setHousePdfBytes(result.housePdfBytes);
+      setHouse4x6PdfBytes(house4x6Bytes);
       setStickerCount(result.stickerCount);
       setHouseCount(result.houseCount);
       setSkippedProducts(result.skippedProducts);
-      
+
       console.log('[Label Caching] Labels generated and cached. Hash:', currentDataHash.substring(0, 8));
       setActiveTab('labels');
       showSuccess('Labels generated', `Generated ${result.stickerCount} sticker and ${result.houseCount} house labels`);
@@ -433,7 +516,7 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
     } finally {
       setIsGeneratingLabels(false);
     }
-  }, [physicalItems, masterData, nutritionData, labelCacheHash, currentDataHash, cachedStickerPdfBytes, cachedHousePdfBytes, cachedStickerCount, cachedHouseCount, cachedSkippedProducts, showSuccess, showError]);
+  }, [physicalItems, masterData, nutritionData, labelCacheHash, currentDataHash, cachedStickerPdfBytes, cachedHousePdfBytes, cachedHouse4x6PdfBytes, cachedStickerCount, cachedHouseCount, cachedSkippedProducts, showSuccess, showError]);
 
   const handleGenerateProductLabels = useCallback(async () => {
     if (physicalItems.length === 0) {
@@ -444,7 +527,7 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
     if (labelCacheHash === currentDataHash && cachedProductLabelPdfBytes) {
       console.log('[Label Caching] Using cached product labels. Hash:', currentDataHash.substring(0, 8));
       setProductLabelPdfBytes(cachedProductLabelPdfBytes);
-      setProductLabelPdfBytesWithDate(cachedProductLabelPdfBytesWithDate);
+      setProductLabel50x25PdfBytes(cachedProductLabel50x25PdfBytes);
       setProductLabelCount(cachedProductLabelCount);
       return;
     }
@@ -472,15 +555,15 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
         return;
       }
       
-      const productPdfWithoutDate = await generateProductLabelsPdf(productList, false);
-      const productPdfWithDate = await generateProductLabelsPdf(productList, true);
-      
-      setCachedProductLabelPdfBytes(productPdfWithoutDate);
-      setCachedProductLabelPdfBytesWithDate(productPdfWithDate);
+      const productPdf96x25 = await generateProductLabelsPdf(productList, false, '96x25mm');
+      const productPdf50x25 = await generateProductLabelsPdf(productList, false, '50x25mm');
+
+      setCachedProductLabelPdfBytes(productPdf96x25);
+      setCachedProductLabel50x25PdfBytes(productPdf50x25);
       setCachedProductLabelCount(productList.length);
-      
-      setProductLabelPdfBytes(productPdfWithoutDate);
-      setProductLabelPdfBytesWithDate(productPdfWithDate);
+
+      setProductLabelPdfBytes(productPdf96x25);
+      setProductLabel50x25PdfBytes(productPdf50x25);
       setProductLabelCount(productList.length);
       
       console.log('[Label Caching] Product labels generated and cached. Hash:', currentDataHash.substring(0, 8));
@@ -491,7 +574,7 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
     } finally {
       setIsGeneratingProductLabels(false);
     }
-  }, [physicalItems, masterData, labelCacheHash, currentDataHash, cachedProductLabelPdfBytes, cachedProductLabelPdfBytesWithDate, cachedProductLabelCount, showSuccess, showError]);
+  }, [physicalItems, masterData, labelCacheHash, currentDataHash, cachedProductLabelPdfBytes, cachedProductLabel50x25PdfBytes, cachedProductLabelCount, showSuccess, showError]);
 
   const handleGenerateMrpLabels = useCallback(async () => {
     if (physicalItems.length === 0) {
@@ -525,6 +608,32 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
       setIsGeneratingMrpLabels(false);
     }
   }, [physicalItems, masterData, labelCacheHash, currentDataHash, cachedMrpPdfBytes, cachedMrpCount, showSuccess, showError]);
+
+  const handleGenerateCombinedVerticalLabels = useCallback(async () => {
+    if (physicalItems.length === 0) {
+      showError('No data', 'No physical items to generate labels for. Please process PDFs first.');
+      return;
+    }
+    if (labelCacheHash === currentDataHash && cachedCombinedVerticalPdfBytes) {
+      setCombinedVerticalPdfBytes(cachedCombinedVerticalPdfBytes);
+      setCombinedVerticalCount(cachedCombinedVerticalCount);
+      return;
+    }
+    setIsGeneratingCombinedVertical(true);
+    try {
+      const { combinedVerticalPdfBytes: pdfBytes, combinedVerticalCount: count } =
+        await generateCombinedVerticalLabels(physicalItems, masterData);
+      setCachedCombinedVerticalPdfBytes(pdfBytes);
+      setCachedCombinedVerticalCount(count);
+      setCombinedVerticalPdfBytes(pdfBytes);
+      setCombinedVerticalCount(count);
+      showSuccess('Labels generated', `Generated ${count} combined vertical sticker labels`);
+    } catch (error: any) {
+      showError('Generation failed', `Error generating combined vertical labels: ${error.message || error}`);
+    } finally {
+      setIsGeneratingCombinedVertical(false);
+    }
+  }, [physicalItems, masterData, labelCacheHash, currentDataHash, cachedCombinedVerticalPdfBytes, cachedCombinedVerticalCount, showSuccess, showError]);
 
   const downloadPdf = (pdfBytes: Uint8Array, filename: string) => {
     const blob = new Blob([pdfBytes as BlobPart], { type: 'application/pdf' });
@@ -566,60 +675,69 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
     );
   }
 
+  const today = new Date().toISOString().split('T')[0];
+
   return (
     <div className="w-full">
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 mb-6">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 mb-6 overflow-hidden">
         {/* Tabs */}
-        <div className="border-b border-gray-200">
-          <nav className="flex -mb-px">
-            {(['upload', 'results', 'downloads', 'labels'] as const).map((tab) => (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                className={`
-                  px-6 py-3 text-sm font-medium border-b-2 transition-colors
-                  ${activeTab === tab
-                    ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                  }
-                `}
-              >
-                {tab === 'upload' && '📤 Upload'}
-                {tab === 'results' && '📊 Results'}
-                {tab === 'downloads' && '💾 Downloads'}
-                {tab === 'labels' && '🏷️ Labels'}
-              </button>
-            ))}
+        <div className="border-b border-gray-200 bg-gray-50">
+          <nav className="flex">
+            {(['upload', 'results', 'downloads', 'labels'] as const).map((tab) => {
+              const badges: Record<string, string | null> = {
+                upload: pdfFiles.length > 0 ? String(pdfFiles.length) : null,
+                results: physicalItems.length > 0 ? String(physicalItems.length) : null,
+                downloads: null,
+                labels: stickerCount + houseCount > 0 ? String(stickerCount + houseCount) : null,
+              };
+              const labels = { upload: 'Upload', results: 'Results', downloads: 'Downloads', labels: 'Labels' };
+              const icons = { upload: '📤', results: '📊', downloads: '💾', labels: '🏷️' };
+              return (
+                <button
+                  key={tab}
+                  onClick={() => setActiveTab(tab)}
+                  className={`flex items-center gap-2 px-5 py-3.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap
+                    ${activeTab === tab
+                      ? 'border-blue-500 text-blue-600 bg-white'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-white/60'
+                    }`}
+                >
+                  <span>{icons[tab]}</span>
+                  <span>{labels[tab]}</span>
+                  {badges[tab] && (
+                    <span className={`text-xs px-1.5 py-0.5 rounded-full font-semibold
+                      ${activeTab === tab ? 'bg-blue-100 text-blue-700' : 'bg-gray-200 text-gray-600'}`}>
+                      {badges[tab]}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </nav>
         </div>
 
         {/* Tab Content */}
         <div className="p-6">
-          {/* Upload Tab */}
+
+          {/* ── UPLOAD TAB ── */}
           {activeTab === 'upload' && (
-            <div className="animate-fadeIn">
-              <h3 className="text-lg font-semibold text-gray-900 mb-4">Upload Flipkart Invoice PDFs</h3>
-              
+            <div>
+              <div className="mb-5">
+                <h3 className="text-base font-semibold text-gray-900">Upload Flipkart Invoice PDFs</h3>
+                <p className="text-sm text-gray-500 mt-0.5">Upload one or more invoice PDFs to generate the packing plan</p>
+              </div>
+
               {pdfFiles.length === 0 ? (
                 <FileUploadZone
                   onFilesSelected={(files) => {
-                    if (files.length > MAX_FILES) {
-                      showError('Too many files', `Maximum ${MAX_FILES} files allowed`);
-                      return;
-                    }
+                    if (files.length > MAX_FILES) { showError('Too many files', `Maximum ${MAX_FILES} files allowed`); return; }
                     const totalSizeMB = files.reduce((sum, f) => sum + f.size, 0) / (1024 * 1024);
-                    if (totalSizeMB > MAX_TOTAL_SIZE_MB) {
-                      showError('Files too large', `Maximum total size is ${MAX_TOTAL_SIZE_MB} MB`);
-                      return;
-                    }
+                    if (totalSizeMB > MAX_TOTAL_SIZE_MB) { showError('Files too large', `Maximum total size is ${MAX_TOTAL_SIZE_MB} MB`); return; }
                     const validFiles: File[] = [];
                     for (const file of files) {
                       const validation = validatePdfFile(file, 50);
-                      if (validation.valid) {
-                        validFiles.push(file);
-                      } else {
-                        showError('Invalid file', `${file.name}: ${validation.message}`);
-                      }
+                      if (validation.valid) validFiles.push(file);
+                      else showError('Invalid file', `${file.name}: ${validation.message}`);
                     }
                     if (validFiles.length > 0) {
                       setPdfFiles(validFiles);
@@ -631,215 +749,124 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
                   maxFiles={MAX_FILES}
                   maxSizeMB={50}
                   disabled={isProcessing}
-                  label="Upload PDF Files"
-                  description={`Up to ${MAX_FILES} PDF files, ${MAX_TOTAL_SIZE_MB}MB total`}
+                  label="Drop Flipkart invoice PDFs here"
+                  description={`Up to ${MAX_FILES} files · max ${MAX_TOTAL_SIZE_MB} MB total`}
                 />
               ) : (
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm text-gray-600">
-                      {pdfFiles.length} file(s) selected • {(pdfFiles.reduce((sum, f) => sum + f.size, 0) / (1024 * 1024)).toFixed(2)} MB total
-                    </p>
-                    <button
-                      onClick={() => {
-                        confirm({
-                          title: 'Clear Files',
-                          message: 'Are you sure you want to remove all selected files?',
-                          variant: 'default',
-                          onConfirm: () => {
-                            setPdfFiles([]);
-                            setProcessingComplete(false);
-                          }
-                        });
-                      }}
-                      className="text-sm text-red-600 hover:text-red-700"
-                    >
-                      Clear All
-                    </button>
-                  </div>
-                  <div className="space-y-2">
-                    {pdfFiles.map((file, index) => (
-                      <div key={index} className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
-                        <div className="flex items-center gap-3">
-                          <FileText className="h-5 w-5 text-gray-400" />
-                          <div>
-                            <p className="text-sm font-medium text-gray-900">{file.name}</p>
-                            <p className="text-xs text-gray-500">{(file.size / (1024 * 1024)).toFixed(2)} MB</p>
+                <>
+                  {/* File list */}
+                  <div className="border border-gray-200 rounded-lg overflow-hidden mb-4">
+                    <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-200">
+                      <span className="text-sm font-medium text-gray-700">
+                        {pdfFiles.length} file{pdfFiles.length !== 1 ? 's' : ''} selected
+                        <span className="text-gray-400 ml-2">
+                          ({(pdfFiles.reduce((sum, f) => sum + f.size, 0) / (1024 * 1024)).toFixed(1)} MB)
+                        </span>
+                      </span>
+                      <button
+                        onClick={() => confirm({ title: 'Clear Files', message: 'Remove all selected files?', variant: 'default', onConfirm: () => { setPdfFiles([]); setProcessingComplete(false); } })}
+                        className="text-xs text-red-500 hover:text-red-700 font-medium"
+                      >
+                        Clear all
+                      </button>
+                    </div>
+                    <div className="divide-y divide-gray-100 max-h-52 overflow-y-auto">
+                      {pdfFiles.map((file, idx) => (
+                        <div key={idx} className="flex items-center justify-between px-4 py-2.5 hover:bg-gray-50 transition-colors">
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <FileText className="h-4 w-4 text-red-400 flex-shrink-0" />
+                            <span className="text-sm text-gray-800 truncate">{file.name}</span>
+                          </div>
+                          <div className="flex items-center gap-3 ml-3">
+                            <span className="text-xs text-gray-400 whitespace-nowrap">{(file.size / (1024 * 1024)).toFixed(1)} MB</span>
+                            <button onClick={() => handleRemoveFile(idx)} className="p-1 text-gray-300 hover:text-red-500 transition-colors rounded">
+                              <X className="h-3.5 w-3.5" />
+                            </button>
                           </div>
                         </div>
-                        <button
-                          onClick={() => {
-                            setPdfFiles(prev => prev.filter((_, i) => i !== index));
-                          }}
-                          className="p-1 text-gray-400 hover:text-red-600 transition-colors"
-                        >
-                          <X className="h-4 w-4" />
-                        </button>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
 
-              {pdfFiles.length > 0 && (
-                <div className="mt-4">
-                  {(() => {
-                    const totalSizeMB = pdfFiles.reduce((sum, f) => sum + f.size, 0) / (1024 * 1024);
-                    return (
-                      <>
-                        <p className="text-sm text-gray-600 mb-2">
-                          {pdfFiles.length} file(s) selected • {totalSizeMB.toFixed(2)} MB total
-                        </p>
-                        {totalSizeMB > 100 && (
-                          <p className="text-sm text-yellow-600 mb-2">
-                            ⚠️ Large batch - processing may take longer
-                          </p>
-                        )}
-                      </>
-                    );
-                  })()}
-                  <div className="space-y-2 mb-4">
-                    {pdfFiles.map((file, idx) => (
-                      <div key={idx} className="flex items-center justify-between bg-gray-50 p-2 rounded-md border border-gray-200">
-                        <span className="text-sm text-gray-700 flex items-center">
-                          <FileText className="w-4 h-4 mr-2 text-gray-500" />
-                          {file.name}
-                        </span>
-                        <button
-                          onClick={() => handleRemoveFile(idx)}
-                          className="ml-2 p-1 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
-                          title="Remove file"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                  <button
-                    onClick={handleProcessPdfs}
-                    disabled={isProcessing}
-                    className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center"
-                  >
-                    {isProcessing ? (
-                      <>
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                        Processing...
-                      </>
-                    ) : (
-                      <>
-                        <FileText className="w-4 h-4 mr-2" />
-                        Process PDFs
-                      </>
-                    )}
-                  </button>
-                  
-                  {isProcessing && (
-                    <div className="mt-4">
-                      <div className="w-full bg-gray-200 rounded-full h-2.5">
-                        <div
-                          className="bg-blue-600 h-2.5 rounded-full transition-all"
-                          style={{ width: `${processingProgress * 100}%` }}
-                        />
-                      </div>
-                      <p className="mt-2 text-sm text-gray-600">{processingStatus}</p>
+                  {/* Warning for large batches */}
+                  {pdfFiles.reduce((sum, f) => sum + f.size, 0) / (1024 * 1024) > 100 && (
+                    <div className="flex items-center gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
+                      <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                      Large batch — processing may take a few minutes
                     </div>
                   )}
-                </div>
+
+                  {/* Process button + progress */}
+                  {isProcessing ? (
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                      <div className="flex items-center gap-3 mb-3">
+                        <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+                        <span className="text-sm font-medium text-blue-800">Processing PDFs…</span>
+                      </div>
+                      <div className="w-full bg-blue-200 rounded-full h-1.5 mb-2">
+                        <div className="bg-blue-600 h-1.5 rounded-full transition-all duration-300" style={{ width: `${processingProgress * 100}%` }} />
+                      </div>
+                      <p className="text-xs text-blue-600">{processingStatus}</p>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={handleProcessPdfs}
+                      className="w-full px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium flex items-center justify-center gap-2 transition-colors shadow-sm"
+                    >
+                      <FileText className="w-4 h-4" />
+                      Process {pdfFiles.length} PDF{pdfFiles.length !== 1 ? 's' : ''}
+                    </button>
+                  )}
+                </>
               )}
             </div>
           )}
 
-          {/* Results Tab */}
+          {/* ── RESULTS TAB ── */}
           {activeTab === 'results' && (
             <div>
               {orders.length > 0 ? (
                 <>
-                  {showDebugInfo && processingDebugInfo && (
-                    <div className="mb-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
-                      <h4 className="text-sm font-semibold text-blue-900 mb-3">Processing Debug Information</h4>
-                      <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
-                        <div>
-                          <p className="text-blue-700 font-medium">Unique SKUs Extracted</p>
-                          <p className="text-blue-900 text-lg font-bold">{processingDebugInfo.uniqueSKUsExtracted}</p>
-                        </div>
-                        <div>
-                          <p className="text-blue-700 font-medium">SKUs in Master Data</p>
-                          <p className="text-blue-900 text-lg font-bold">{processingDebugInfo.totalSKUsInMaster}</p>
-                        </div>
-                        <div>
-                          <p className="text-blue-700 font-medium">Matched SKUs</p>
-                          <p className="text-green-600 text-lg font-bold">{processingDebugInfo.matchedSKUs}</p>
-                        </div>
-                        <div>
-                          <p className="text-blue-700 font-medium">Unmatched SKUs</p>
-                          <p className="text-red-600 text-lg font-bold">{processingDebugInfo.unmatchedSKUs}</p>
-                        </div>
-                        <div>
-                          <p className="text-blue-700 font-medium">Files Processed</p>
-                          <p className="text-blue-900 text-lg font-bold">{processingDebugInfo.filesProcessed}</p>
-                        </div>
-                        <div>
-                          <p className="text-blue-700 font-medium">Invoice Pages Found</p>
-                          <p className="text-blue-900 text-lg font-bold">{processingDebugInfo.totalPages}</p>
-                        </div>
+                  {/* Stats row */}
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
+                    {[
+                      { label: 'Invoices', value: stats.total_invoices, color: 'blue' },
+                      { label: 'Multi-Qty', value: stats.multi_qty_invoices, color: 'amber' },
+                      { label: 'SKUs', value: orders.length, color: 'violet' },
+                      { label: 'Qty Ordered', value: stats.total_qty_ordered, color: 'green' },
+                      { label: 'Qty Physical', value: stats.total_qty_physical, color: 'teal' },
+                    ].map(({ label, value, color }) => (
+                      <div key={label} className={`rounded-lg p-3 border bg-${color}-50 border-${color}-100`}>
+                        <p className={`text-xs font-medium text-${color}-600 mb-1`}>{label}</p>
+                        <p className={`text-2xl font-bold text-${color}-800`}>{value}</p>
                       </div>
-                    </div>
-                  )}
-
-                  <div className="mb-4 flex items-center justify-between">
-                    <button
-                      onClick={() => setShowDebugInfo(!showDebugInfo)}
-                      className="text-sm text-gray-600 hover:text-gray-800 underline"
-                    >
-                      {showDebugInfo ? '▼ Hide' : '▶ Show'} Debug Information
-                    </button>
+                    ))}
                   </div>
 
-                  {/* Statistics */}
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                    <div className="bg-gray-50 p-4 rounded-lg">
-                      <p className="text-sm text-gray-600">Orders</p>
-                      <p className="text-2xl font-bold text-gray-900">{orders.length}</p>
-                    </div>
-                    <div className="bg-gray-50 p-4 rounded-lg">
-                      <p className="text-sm text-gray-600">Items</p>
-                      <p className="text-2xl font-bold text-gray-900">{physicalItems.length}</p>
-                    </div>
-                    <div className="bg-gray-50 p-4 rounded-lg">
-                      <p className="text-sm text-gray-600">Qty Ordered</p>
-                      <p className="text-2xl font-bold text-gray-900">{stats.total_qty_ordered}</p>
-                    </div>
-                    <div className="bg-gray-50 p-4 rounded-lg">
-                      <p className="text-sm text-gray-600">Qty Physical</p>
-                      <p className="text-2xl font-bold text-gray-900">{stats.total_qty_physical}</p>
-                    </div>
-                  </div>
-
+                  {/* Missing products alert */}
                   {missingProducts.length > 0 && (
-                    <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6">
-                      <div className="flex">
-                        <AlertCircle className="h-5 w-5 text-yellow-400 mr-3" />
-                        <div>
-                          <p className="text-sm font-medium text-yellow-800">
-                            {missingProducts.length} product(s) have issues
-                          </p>
-                          <details className="mt-2">
-                            <summary className="cursor-pointer text-sm text-yellow-700">View details</summary>
-                            <div className="mt-2 overflow-x-auto">
-                              <table className="min-w-full divide-y divide-gray-200 text-sm">
-                                <thead className="bg-yellow-100">
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-5">
+                      <div className="flex items-start gap-2">
+                        <AlertCircle className="h-4 w-4 text-amber-500 mt-0.5 flex-shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-amber-800">{missingProducts.length} SKU{missingProducts.length !== 1 ? 's' : ''} with issues</p>
+                          <details className="mt-1.5">
+                            <summary className="cursor-pointer text-xs text-amber-600 hover:text-amber-800">View details</summary>
+                            <div className="mt-2 overflow-x-auto rounded border border-amber-200">
+                              <table className="min-w-full text-xs">
+                                <thead className="bg-amber-100">
                                   <tr>
-                                    <th className="px-3 py-2 text-left text-xs font-medium">SKU</th>
-                                    <th className="px-3 py-2 text-left text-xs font-medium">Issue</th>
-                                    <th className="px-3 py-2 text-left text-xs font-medium">Product</th>
+                                    {['SKU', 'Issue', 'Product'].map(h => (
+                                      <th key={h} className="px-3 py-1.5 text-left font-semibold text-amber-800">{h}</th>
+                                    ))}
                                   </tr>
                                 </thead>
-                                <tbody className="bg-white divide-y divide-gray-200">
+                                <tbody className="bg-white divide-y divide-amber-100">
                                   {missingProducts.map((item, idx) => (
                                     <tr key={idx}>
-                                      <td className="px-3 py-2">{item.ASIN}</td>
-                                      <td className="px-3 py-2">{item.Issue}</td>
-                                      <td className="px-3 py-2">{item.Product || 'N/A'}</td>
+                                      <td className="px-3 py-1.5 font-mono">{item.ASIN}</td>
+                                      <td className="px-3 py-1.5 text-red-600">{item.Issue}</td>
+                                      <td className="px-3 py-1.5">{item.Product || '—'}</td>
                                     </tr>
                                   ))}
                                 </tbody>
@@ -851,303 +878,471 @@ const FlipkartPackingPlanView: React.FC<FlipkartPackingPlanViewProps> = ({ maste
                     </div>
                   )}
 
-                  {/* Ordered Items Table */}
-                  <div className="mb-6">
-                    <h4 className="text-md font-semibold text-gray-900 mb-3">Ordered Items</h4>
-                    <div className="overflow-x-auto" style={{ maxHeight: '250px', overflowY: 'auto' }}>
-                      <table className="min-w-full divide-y divide-gray-200 text-sm">
-                        <thead className="bg-gray-50 sticky top-0">
-                          <tr>
-                            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">SKU</th>
-                            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Qty</th>
-                          </tr>
-                        </thead>
-                        <tbody className="bg-white divide-y divide-gray-200">
-                          {orders.map((order, idx) => (
-                            <tr key={idx}>
-                              <td className="px-3 py-2 whitespace-nowrap">{order.SKU}</td>
-                              <td className="px-3 py-2 whitespace-nowrap">{order.Qty}</td>
+                  {/* Ordered Items */}
+                  <div className="mb-5">
+                    <h4 className="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-2">Ordered Items</h4>
+                    <div className="border border-gray-200 rounded-lg overflow-hidden">
+                      <div className="overflow-auto max-h-56">
+                        <table className="min-w-full text-sm">
+                          <thead className="bg-gray-50 sticky top-0 z-10">
+                            <tr>
+                              {['Item', 'Weight', 'Qty', 'Packet Size', 'SKU ID'].map(h => (
+                                <th key={h} className="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">{h}</th>
+                              ))}
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                          </thead>
+                          <tbody className="bg-white divide-y divide-gray-100">
+                            {(enrichedOrders.length > 0 ? enrichedOrders : orders.map(o => ({ Item: o.SKU, Weight: '', Qty: o.Qty, 'Packet Size': '', 'SKU ID': o.SKU }))).map((order, idx) => (
+                              <tr key={idx} className="hover:bg-gray-50">
+                                <td className="px-3 py-2 font-medium text-gray-900">{order.Item}</td>
+                                <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{order.Weight}</td>
+                                <td className="px-3 py-2">
+                                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold
+                                    ${order.Qty > 1 ? 'bg-orange-100 text-orange-700' : 'bg-gray-100 text-gray-700'}`}>
+                                    {order.Qty}
+                                  </span>
+                                </td>
+                                <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{order['Packet Size']}</td>
+                                <td className="px-3 py-2 font-mono text-xs text-gray-400">{order['SKU ID']}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
                   </div>
 
-                  <div className="mb-6 border-t border-gray-200 pt-6">
-                    <h4 className="text-md font-semibold text-gray-900 mb-3">Physical Packing Plan</h4>
-                    <div className="overflow-x-auto">
-                      <table className="min-w-full divide-y divide-gray-200 text-sm">
-                        <thead className="bg-gray-50">
-                          <tr>
-                            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Item</th>
-                            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Weight</th>
-                            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Qty</th>
-                            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Packet Size</th>
-                            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">FNSKU</th>
-                            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Status</th>
-                          </tr>
-                        </thead>
-                        <tbody className="bg-white divide-y divide-gray-200">
-                          {physicalItems.map((item, idx) => (
-                            <tr key={idx} className={item.Status.includes('MISSING') ? 'bg-red-50' : 'bg-green-50'}>
-                              <td className="px-3 py-2 whitespace-nowrap font-medium">
-                                {item.is_split ? (
-                                  <span className="font-bold text-blue-700">{item.item} ⭐</span>
-                                ) : (
-                                  item.item
-                                )}
-                              </td>
-                              <td className="px-3 py-2 whitespace-nowrap">{item.weight}</td>
-                              <td className="px-3 py-2 whitespace-nowrap">{item.Qty}</td>
-                              <td className="px-3 py-2 whitespace-nowrap">{item['Packet Size']}</td>
-                              <td className="px-3 py-2 whitespace-nowrap">{item.FNSKU}</td>
-                              <td className="px-3 py-2 whitespace-nowrap">{item.Status}</td>
+                  {/* Physical Packing Plan */}
+                  <div>
+                    <h4 className="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-2">Physical Packing Plan</h4>
+                    <div className="border border-gray-200 rounded-lg overflow-hidden">
+                      <div className="overflow-auto max-h-72">
+                        <table className="min-w-full text-sm">
+                          <thead className="bg-gray-50 sticky top-0 z-10">
+                            <tr>
+                              {['Item', 'Weight', 'Qty', 'Packet Size', 'FNSKU', 'Status'].map(h => (
+                                <th key={h} className="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">{h}</th>
+                              ))}
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                          </thead>
+                          <tbody className="bg-white divide-y divide-gray-100">
+                            {physicalItems.map((item, idx) => {
+                              const isMissing = item.Status.includes('MISSING');
+                              return (
+                                <tr key={idx} className="hover:bg-gray-50">
+                                  <td className="px-3 py-2 font-medium text-gray-900">
+                                    {item.is_split
+                                      ? <span className="text-violet-700">{item.item} <span className="text-xs bg-violet-100 text-violet-600 px-1 py-0.5 rounded ml-1">split</span></span>
+                                      : item.item}
+                                  </td>
+                                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{item.weight}</td>
+                                  <td className="px-3 py-2">
+                                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold
+                                      ${item.Qty > 1 ? 'bg-orange-100 text-orange-700' : 'bg-gray-100 text-gray-700'}`}>
+                                      {item.Qty}
+                                    </span>
+                                  </td>
+                                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{item['Packet Size']}</td>
+                                  <td className="px-3 py-2 font-mono text-xs text-gray-400">{item.FNSKU}</td>
+                                  <td className="px-3 py-2">
+                                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold
+                                      ${isMissing ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+                                      {isMissing ? 'Missing' : 'OK'}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
+                  </div>
+
+                  {/* Debug toggle */}
+                  <div className="mt-4 pt-4 border-t border-gray-100">
+                    <button onClick={() => setShowDebugInfo(!showDebugInfo)} className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1">
+                      <span>{showDebugInfo ? '▼' : '▶'}</span> Debug info
+                    </button>
+                    {showDebugInfo && processingDebugInfo && (
+                      <div className="mt-2 grid grid-cols-3 gap-2 text-xs bg-gray-50 rounded-lg p-3">
+                        {[
+                          ['SKUs Extracted', processingDebugInfo.uniqueSKUsExtracted, 'gray'],
+                          ['Matched', processingDebugInfo.matchedSKUs, 'green'],
+                          ['Unmatched', processingDebugInfo.unmatchedSKUs, 'red'],
+                          ['Files', processingDebugInfo.filesProcessed, 'gray'],
+                          ['Invoice Pages', processingDebugInfo.totalPages, 'gray'],
+                          ['Master SKUs', processingDebugInfo.totalSKUsInMaster, 'gray'],
+                        ].map(([label, val, color]) => (
+                          <div key={label as string}>
+                            <p className="text-gray-500">{label}</p>
+                            <p className={`font-bold text-${color}-600`}>{val}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </>
               ) : (
-                <div className="text-center py-12">
-                  <Package className="mx-auto h-12 w-12 text-gray-400" />
-                  <h3 className="mt-2 text-sm font-medium text-gray-900">No data available</h3>
-                  <p className="mt-1 text-sm text-gray-500">Upload and process PDF files to see results.</p>
-                </div>
+                <EmptyState
+                  icon={<Package className="h-10 w-10 text-gray-300" />}
+                  title="No results yet"
+                  description="Upload and process invoice PDFs to see the packing plan"
+                  action={{ label: 'Go to Upload', onClick: () => setActiveTab('upload') }}
+                />
               )}
             </div>
           )}
 
-          {/* Downloads Tab */}
+          {/* ── DOWNLOADS TAB ── */}
           {activeTab === 'downloads' && (
             <div>
               {!processingComplete && pdfFiles.length > 0 ? (
                 <div className="text-center py-12">
-                  <Loader2 className="mx-auto h-12 w-12 text-gray-400 animate-spin" />
-                  <h3 className="mt-2 text-sm font-medium text-gray-900">Processing files...</h3>
-                  <p className="mt-1 text-sm text-gray-500">Please wait for processing to complete.</p>
+                  <Loader2 className="mx-auto h-10 w-10 text-gray-300 animate-spin" />
+                  <p className="mt-3 text-sm text-gray-500">Processing files, please wait…</p>
                 </div>
               ) : physicalItems.length > 0 && processingComplete ? (
-                <div className="space-y-4">
-                  <button
-                    onClick={handleDownloadSummaryPdf}
-                    className="w-full px-4 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 flex items-center justify-center"
-                  >
-                    <Download className="w-5 h-5 mr-2" />
-                    Download Packing Plan PDF
-                  </button>
+                <div className="space-y-3">
+                  {/* Reports */}
+                  <div>
+                    <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Reports</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <DownloadButton
+                        onDownload={handleDownloadSummaryPdf}
+                        tickSize="h-4 w-4"
+                        className="flex items-center gap-3 px-4 py-3.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors shadow-sm text-left"
+                      >
+                        <div className="p-1.5 bg-white/20 rounded-md"><Download className="w-4 h-4" /></div>
+                        <div>
+                          <p className="font-medium text-sm">Packing Plan</p>
+                          <p className="text-xs text-blue-200">PDF summary</p>
+                        </div>
+                      </DownloadButton>
+                      <DownloadButton
+                        onDownload={handleDownloadExcel}
+                        tickSize="h-4 w-4"
+                        className="flex items-center gap-3 px-4 py-3.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors shadow-sm text-left"
+                      >
+                        <div className="p-1.5 bg-white/20 rounded-md"><Download className="w-4 h-4" /></div>
+                        <div>
+                          <p className="font-medium text-sm">Excel Workbook</p>
+                          <p className="text-xs text-emerald-200">.xlsx with all data</p>
+                        </div>
+                      </DownloadButton>
+                    </div>
+                  </div>
 
-                  <button
-                    onClick={handleDownloadExcel}
-                    className="w-full px-4 py-3 bg-green-600 text-white rounded-md hover:bg-green-700 flex items-center justify-center"
-                  >
-                    <Download className="w-5 h-5 mr-2" />
-                    Download Excel Workbook
-                  </button>
-
-                  <div className="border-t border-gray-200 pt-4 mt-4">
-                    <h3 className="text-sm font-semibold text-gray-700 mb-3">Sorted Shipping Labels</h3>
+                  {/* Shipping Labels PDF */}
+                  <div>
+                    <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Shipping Labels</p>
                     {isGeneratingSortedPdf ? (
-                      <div className="flex items-center justify-center py-4">
-                        <Loader2 className="w-5 h-5 animate-spin text-blue-600 mr-2" />
-                        <span className="text-sm text-gray-600">Generating sorted PDF...</span>
+                      <div className="flex items-center gap-3 px-4 py-3.5 bg-gray-50 border border-gray-200 rounded-lg text-gray-500">
+                        <Loader2 className="w-4 h-4 animate-spin flex-shrink-0" />
+                        <div>
+                          <p className="text-sm font-medium text-gray-700">Generating PDF…</p>
+                          <p className="text-xs text-gray-400">Cropping & highlighting multi-qty pages</p>
+                        </div>
                       </div>
                     ) : sortedPdfBytes ? (
-                      <button
-                        onClick={() => downloadPdf(sortedPdfBytes, `Flipkart_Sorted_Shipping_Labels_${new Date().toISOString().split('T')[0]}.pdf`)}
-                        className="w-full px-4 py-3 bg-purple-600 text-white rounded-md hover:bg-purple-700 flex items-center justify-center"
+                      <DownloadButton
+                        onDownload={() => downloadPdf(sortedPdfBytes, `Flipkart_Highlighted_Shipping_Labels_${today}.pdf`)}
+                        tickSize="h-4 w-4"
+                        className="w-full flex items-center gap-3 px-4 py-3.5 bg-violet-600 text-white rounded-lg hover:bg-violet-700 transition-colors shadow-sm text-left"
                       >
-                        <Download className="w-5 h-5 mr-2" />
-                        Download Sorted Shipping Labels PDF
-                      </button>
+                        <div className="p-1.5 bg-white/20 rounded-md"><Download className="w-4 h-4" /></div>
+                        <div>
+                          <p className="font-medium text-sm">Highlighted Shipping Labels</p>
+                          <p className="text-xs text-violet-200">Cropped · multi-qty pages highlighted</p>
+                        </div>
+                      </DownloadButton>
                     ) : (
-                      <div className="text-sm text-gray-500 text-center py-2">
-                        Sorted PDF not available. Please process PDFs again.
+                      <div className="flex items-center gap-2 px-4 py-3 bg-gray-50 border border-dashed border-gray-300 rounded-lg text-sm text-gray-400">
+                        <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                        PDF not available — process PDFs again
                       </div>
                     )}
                   </div>
                 </div>
               ) : (
-                <div className="text-center py-12">
-                  <FileText className="mx-auto h-12 w-12 text-gray-400" />
-                  <h3 className="mt-2 text-sm font-medium text-gray-900">No downloads available</h3>
-                  <p className="mt-1 text-sm text-gray-500">Process PDF files first to generate downloads.</p>
-                </div>
+                <EmptyState
+                  icon={<Download className="h-10 w-10 text-gray-300" />}
+                  title="No downloads yet"
+                  description="Process invoice PDFs first to generate downloads"
+                  action={{ label: 'Go to Upload', onClick: () => setActiveTab('upload') }}
+                />
               )}
             </div>
           )}
 
-          {/* Labels Tab */}
+          {/* ── LABELS TAB ── */}
           {activeTab === 'labels' && (
             <div>
               {!processingComplete && pdfFiles.length > 0 ? (
                 <div className="text-center py-12">
-                  <Loader2 className="mx-auto h-12 w-12 text-gray-400 animate-spin" />
-                  <h3 className="mt-2 text-sm font-medium text-gray-900">Processing files...</h3>
-                  <p className="mt-1 text-sm text-gray-500">Please wait for processing to complete.</p>
+                  <Loader2 className="mx-auto h-10 w-10 text-gray-300 animate-spin" />
+                  <p className="mt-3 text-sm text-gray-500">Processing files, please wait…</p>
                 </div>
               ) : physicalItems.length > 0 && processingComplete ? (
-                <>
-                  {stickerCount === 0 && houseCount === 0 && !isGeneratingLabels && (
-                    <div className="mb-6">
+                <div className="flex gap-5 items-start">
+                  {/* Left column — normal labels */}
+                  <div className="flex-1 min-w-0 space-y-6">
+
+                  {/* Generate All button */}
+                  {!isGeneratingLabels && !isGeneratingCombinedVertical && !isGeneratingProductLabels && !isGeneratingMrpLabels && (
+                    <div className="flex justify-end mb-1">
                       <button
-                        onClick={handleGenerateLabels}
-                        className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 flex items-center"
+                        onClick={async () => {
+                          await handleGenerateLabels();
+                          await handleGenerateCombinedVerticalLabels();
+                          await handleGenerateProductLabels();
+                          await handleGenerateMrpLabels();
+                        }}
+                        className="flex items-center gap-2 px-4 py-2 bg-gray-900 text-white text-sm font-medium rounded-lg hover:bg-gray-700 transition-colors"
                       >
-                        <Tag className="w-4 h-4 mr-2" />
-                        Generate Labels
+                        <Tag className="h-4 w-4" /> Generate All Labels
                       </button>
                     </div>
                   )}
 
-                  {isGeneratingLabels && (
-                    <div className="text-center py-8">
-                      <Loader2 className="mx-auto h-8 w-8 animate-spin text-blue-600" />
-                      <p className="mt-2 text-sm text-gray-600">Generating labels...</p>
-                    </div>
-                  )}
-
-                  {(stickerCount > 0 || houseCount > 0) && (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {stickerCount > 0 && stickerPdfBytes && (
-                        <div className="bg-gray-50 p-4 rounded-lg">
-                          <p className="text-sm font-medium text-gray-700 mb-2">Sticker Labels</p>
-                          <p className="text-2xl font-bold text-gray-900 mb-4">{stickerCount}</p>
-                          <button
-                            onClick={() => downloadPdf(stickerPdfBytes, `Sticker_Labels_${new Date().toISOString().split('T')[0]}.pdf`)}
-                            className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 flex items-center justify-center"
-                          >
-                            <Download className="w-4 h-4 mr-2" />
-                            Download ({stickerCount})
-                          </button>
-                        </div>
+                  {/* Sticker + House labels */}
+                  <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                    <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-100">
+                      <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Sticker &amp; House Labels</span>
+                      {stickerCount === 0 && houseCount === 0 && !isGeneratingLabels && (
+                        <button onClick={handleGenerateLabels} className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-md hover:bg-blue-700 transition-colors">
+                          <Tag className="w-3.5 h-3.5" /> Generate
+                        </button>
                       )}
-
-                      {houseCount > 0 && housePdfBytes && (
-                        <div className="bg-gray-50 p-4 rounded-lg">
-                          <p className="text-sm font-medium text-gray-700 mb-2">House Labels</p>
-                          <p className="text-2xl font-bold text-gray-900 mb-4">{houseCount}</p>
-                          <button
-                            onClick={() => downloadPdf(housePdfBytes, `House_Labels_${new Date().toISOString().split('T')[0]}.pdf`)}
-                            className="w-full px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 flex items-center justify-center"
-                          >
-                            <Download className="w-4 h-4 mr-2" />
-                            Download ({houseCount})
-                          </button>
-                        </div>
-                      )}
+                      {isGeneratingLabels && <div className="flex items-center gap-1.5 text-xs text-blue-600"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Generating…</div>}
                     </div>
-                  )}
+
+                    {/* Sticker row */}
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+                      <div>
+                        <p className="text-sm font-medium text-gray-800">Sticker Labels</p>
+                        <p className="text-xs text-gray-400">48×25mm combined</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {stickerCount > 0 && <span className="text-sm font-bold text-blue-600 w-6 text-right">{stickerCount}</span>}
+                        {stickerPdfBytes && stickerCount > 0 ? (
+                          <DownloadButton onDownload={() => downloadPdf(stickerPdfBytes, `Sticker_Labels_${today}.pdf`)} className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-md hover:bg-blue-700 transition-colors">
+                            <Download className="h-3.5 w-3.5" /> Download
+                          </DownloadButton>
+                        ) : !isGeneratingLabels && <span className="text-xs text-gray-400">Not generated</span>}
+                      </div>
+                    </div>
+
+                    {/* House row */}
+                    <div className="flex items-center justify-between px-4 py-3">
+                      <div>
+                        <p className="text-sm font-medium text-gray-800">House Labels</p>
+                        <p className="text-xs text-gray-400">50×100mm triple</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {houseCount > 0 && <span className="text-sm font-bold text-green-600 w-6 text-right">{houseCount}</span>}
+                        {housePdfBytes && houseCount > 0 ? (
+                          <div className="flex items-center gap-1.5">
+                            <DownloadButton onDownload={() => downloadPdf(housePdfBytes, `House_Labels_${today}.pdf`)} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white text-xs font-medium rounded-md hover:bg-green-700 transition-colors">
+                              <Download className="h-3.5 w-3.5" /> Download
+                            </DownloadButton>
+                            {isGenerating4x6 && <div className="flex items-center gap-1 text-xs text-gray-500"><Loader2 className="w-3 h-3 animate-spin" /> 4×6…</div>}
+                            {flags.show4x6Vertical && house4x6PdfBytes && !isGenerating4x6 && (
+                              <DownloadButton onDownload={() => downloadPdf(house4x6PdfBytes, `House_Labels_4x6_Vertical_${today}.pdf`)} className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-600 text-white text-xs font-medium rounded-md hover:bg-teal-700 transition-colors" title="4×6 inch format, 3 labels per page">
+                                <Download className="h-3.5 w-3.5" /> 4×6 Vertical
+                              </DownloadButton>
+                            )}
+                          </div>
+                        ) : !isGeneratingLabels && <span className="text-xs text-gray-400">Not generated</span>}
+                      </div>
+                    </div>
+                  </div>
 
                   {skippedProducts.length > 0 && (
-                    <div className="mt-6">
-                      <details>
-                        <summary className="cursor-pointer text-sm font-medium text-yellow-800">
-                          ⚠️ Products Skipped from Label Generation ({skippedProducts.length})
-                        </summary>
-                        <div className="mt-2 overflow-x-auto">
-                          <table className="min-w-full divide-y divide-gray-200 text-sm">
-                            <thead className="bg-yellow-100">
-                              <tr>
-                                <th className="px-3 py-2 text-left text-xs font-medium">Product</th>
-                                <th className="px-3 py-2 text-left text-xs font-medium">SKU</th>
-                                <th className="px-3 py-2 text-left text-xs font-medium">Packet used</th>
-                                <th className="px-3 py-2 text-left text-xs font-medium">Reason</th>
+                    <details className="bg-white border border-amber-200 rounded-lg overflow-hidden">
+                      <summary className="cursor-pointer flex items-center gap-2 px-4 py-2.5 bg-amber-50 text-xs font-semibold text-amber-700 hover:bg-amber-100">
+                        <AlertCircle className="w-3.5 h-3.5" /> {skippedProducts.length} product{skippedProducts.length !== 1 ? 's' : ''} skipped from label generation
+                      </summary>
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full text-xs divide-y divide-gray-100">
+                          <thead className="bg-gray-50"><tr>{['Product', 'SKU', 'Packet used', 'Reason'].map(h => <th key={h} className="px-3 py-2 text-left font-semibold text-gray-500">{h}</th>)}</tr></thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {skippedProducts.map((item, idx) => (
+                              <tr key={idx} className="hover:bg-gray-50">
+                                <td className="px-3 py-2">{item.Product}</td>
+                                <td className="px-3 py-2 font-mono">{item.ASIN}</td>
+                                <td className="px-3 py-2">{item['Packet used']}</td>
+                                <td className="px-3 py-2 text-red-600">{item.Reason}</td>
                               </tr>
-                            </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
-                              {skippedProducts.map((item, idx) => (
-                                <tr key={idx}>
-                                  <td className="px-3 py-2">{item.Product}</td>
-                                  <td className="px-3 py-2">{item.ASIN}</td>
-                                  <td className="px-3 py-2">{item['Packet used']}</td>
-                                  <td className="px-3 py-2">{item.Reason}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </details>
-                    </div>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </details>
                   )}
 
-                  {/* Product Labels Section */}
-                  <div className="mt-8 border-t border-gray-200 pt-6">
-                    <h3 className="text-lg font-semibold text-gray-800 mb-4">Product Labels (96x25mm)</h3>
-                    {!productLabelPdfBytes && !isGeneratingProductLabels && (
-                      <button
-                        onClick={handleGenerateProductLabels}
-                        className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 flex items-center"
-                      >
-                        <Tag className="w-4 h-4 mr-2" />
-                        Generate Product Labels
-                      </button>
-                    )}
-                    {isGeneratingProductLabels && (
-                      <div className="text-center py-4">
-                        <Loader2 className="mx-auto h-6 w-6 animate-spin text-indigo-600" />
-                        <p className="mt-2 text-sm text-gray-600">Generating product labels...</p>
+                  {/* Combined Vertical Sticker Labels */}
+                  <div className="border-t border-gray-100 pt-5">
+                    <div className="flex items-center justify-between mb-3">
+                      <div>
+                        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Combined Vertical Sticker</p>
+                        <p className="text-xs text-gray-400 mt-0.5">2-page: MRP (50×25mm) + Barcode (50×25mm)</p>
                       </div>
-                    )}
-                    {productLabelPdfBytes && productLabelCount > 0 && (
-                      <div className="bg-gray-50 p-4 rounded-lg">
-                        <p className="text-sm font-medium text-gray-700 mb-2">Product Labels</p>
-                        <p className="text-2xl font-bold text-gray-900 mb-4">{productLabelCount}</p>
+                      {!combinedVerticalPdfBytes && !isGeneratingCombinedVertical && (
                         <button
-                          onClick={() => downloadPdf(productLabelPdfBytes, `Product_Labels_No_Date_${new Date().toISOString().split('T')[0]}.pdf`)}
-                          className="w-full px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 flex items-center justify-center"
+                          onClick={handleGenerateCombinedVerticalLabels}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-orange-600 text-white text-xs font-medium rounded-md hover:bg-orange-700 transition-colors"
                         >
-                          <Download className="w-4 h-4 mr-2" />
-                          Download without Date ({productLabelCount})
+                          <Tag className="w-3.5 h-3.5" /> Generate
                         </button>
+                      )}
+                    </div>
+                    {isGeneratingCombinedVertical ? (
+                      <div className="flex items-center gap-3 px-4 py-4 bg-orange-50 border border-orange-200 rounded-lg text-orange-700">
+                        <Loader2 className="h-5 w-5 animate-spin flex-shrink-0" />
+                        <p className="text-sm font-medium">Generating combined vertical sticker labels…</p>
+                      </div>
+                    ) : combinedVerticalCount > 0 && combinedVerticalPdfBytes ? (
+                      <div className="border border-gray-200 rounded-lg p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <p className="text-sm font-semibold text-gray-700">Combined Vertical Sticker Labels</p>
+                          <span className="text-2xl font-bold text-orange-600">{combinedVerticalCount}</span>
+                        </div>
+                        <DownloadButton
+                          onDownload={() => downloadPdf(combinedVerticalPdfBytes, `Combined_Vertical_Labels_${today}.pdf`)}
+                          tickSize="h-4 w-4"
+                          className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-orange-600 text-white text-sm rounded-md hover:bg-orange-700 transition-colors"
+                        >
+                          <Download className="w-4 h-4" /> Download ({combinedVerticalCount} labels · {combinedVerticalCount * 2} pages)
+                        </DownloadButton>
+                      </div>
+                    ) : (
+                      <div className="px-4 py-3 bg-gray-50 border border-dashed border-gray-300 rounded-lg text-sm text-gray-400 text-center">
+                        Click Generate to create combined vertical sticker labels
                       </div>
                     )}
                   </div>
 
-                  {/* MRP-Only Labels Section */}
-                  <div className="mt-8 border-t border-gray-200 pt-6">
-                    <h3 className="text-lg font-semibold text-gray-800 mb-4">MRP-Only Labels</h3>
-                    {!mrpPdfBytes && !isGeneratingMrpLabels && (
-                      <button
-                        onClick={handleGenerateMrpLabels}
-                        className="px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 flex items-center"
-                      >
-                        <Tag className="w-4 h-4 mr-2" />
-                        Generate MRP-Only Labels
-                      </button>
-                    )}
-                    {isGeneratingMrpLabels && (
-                      <div className="text-center py-4">
-                        <Loader2 className="mx-auto h-6 w-6 animate-spin text-purple-600" />
-                        <p className="mt-2 text-sm text-gray-600">Generating MRP labels...</p>
+                  {/* Product Labels */}
+                  <div className="border-t border-gray-100 pt-5">
+                    <div className="flex items-center justify-between mb-3">
+                      <div>
+                        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Product Labels</p>
+                        <p className="text-xs text-gray-400 mt-0.5">96×25mm · 50×25mm</p>
                       </div>
-                    )}
-                    {mrpPdfBytes && mrpCount > 0 && (
-                      <div className="bg-gray-50 p-4 rounded-lg">
-                        <p className="text-sm font-medium text-gray-700 mb-2">MRP-Only Labels</p>
-                        <p className="text-2xl font-bold text-gray-900 mb-4">{mrpCount}</p>
+                      {!productLabelPdfBytes && !isGeneratingProductLabels && (
                         <button
-                          onClick={() => downloadPdf(mrpPdfBytes, `MRP_Only_Labels_${new Date().toISOString().split('T')[0]}.pdf`)}
-                          className="w-full px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 flex items-center justify-center"
+                          onClick={handleGenerateProductLabels}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white text-xs font-medium rounded-md hover:bg-indigo-700 transition-colors"
                         >
-                          <Download className="w-4 h-4 mr-2" />
-                          Download ({mrpCount})
+                          <Tag className="w-3.5 h-3.5" /> Generate
                         </button>
+                      )}
+                    </div>
+                    {isGeneratingProductLabels ? (
+                      <div className="flex items-center gap-3 px-4 py-4 bg-indigo-50 border border-indigo-200 rounded-lg text-indigo-700">
+                        <Loader2 className="h-5 w-5 animate-spin flex-shrink-0" />
+                        <p className="text-sm font-medium">Generating product labels…</p>
+                      </div>
+                    ) : productLabelPdfBytes && productLabelCount > 0 ? (
+                      <div className="flex items-center justify-between px-4 py-3 border border-gray-200 rounded-lg">
+                        <div>
+                          <p className="text-sm font-medium text-gray-800">Product Labels</p>
+                          <p className="text-xs text-gray-400">96×25mm · 50×25mm</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-bold text-indigo-600">{productLabelCount}</span>
+                          <DownloadButton
+                            onDownload={() => downloadPdf(productLabelPdfBytes, `Product_Labels_96x25_${today}.pdf`)}
+                            className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white text-xs font-medium rounded-md hover:bg-indigo-700 transition-colors"
+                          >
+                            <Download className="w-3.5 h-3.5" /> 96×25mm
+                          </DownloadButton>
+                          {productLabel50x25PdfBytes && (
+                            <DownloadButton
+                              onDownload={() => downloadPdf(productLabel50x25PdfBytes, `Product_Labels_50x25_${today}.pdf`)}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500 text-white text-xs font-medium rounded-md hover:bg-indigo-600 transition-colors"
+                            >
+                              <Download className="w-3.5 h-3.5" /> 50×25mm
+                            </DownloadButton>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="px-4 py-3 bg-gray-50 border border-dashed border-gray-300 rounded-lg text-sm text-gray-400 text-center">
+                        Click Generate to create product labels
                       </div>
                     )}
                   </div>
-                </>
-              ) : (
-                <div className="text-center py-12">
-                  <Tag className="mx-auto h-12 w-12 text-gray-400" />
-                  <h3 className="mt-2 text-sm font-medium text-gray-900">No labels available</h3>
-                  <p className="mt-1 text-sm text-gray-500">Please upload invoice PDFs to generate labels.</p>
+
+                  {/* MRP Labels */}
+                  {flags.showMrpOnlyLabels && (
+                  <div className="border-t border-gray-100 pt-5">
+                    <div className="flex items-center justify-between mb-3">
+                      <div>
+                        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">MRP-Only Labels</p>
+                      </div>
+                      {!mrpPdfBytes && !isGeneratingMrpLabels && (
+                        <button
+                          onClick={handleGenerateMrpLabels}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 text-white text-xs font-medium rounded-md hover:bg-purple-700 transition-colors"
+                        >
+                          <Tag className="w-3.5 h-3.5" /> Generate
+                        </button>
+                      )}
+                    </div>
+                    {isGeneratingMrpLabels ? (
+                      <div className="flex items-center gap-3 px-4 py-4 bg-purple-50 border border-purple-200 rounded-lg text-purple-700">
+                        <Loader2 className="h-5 w-5 animate-spin flex-shrink-0" />
+                        <p className="text-sm font-medium">Generating MRP labels…</p>
+                      </div>
+                    ) : mrpPdfBytes && mrpCount > 0 ? (
+                      <div className="border border-gray-200 rounded-lg p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <p className="text-sm font-semibold text-gray-700">MRP-Only Labels</p>
+                          <span className="text-2xl font-bold text-purple-600">{mrpCount}</span>
+                        </div>
+                        <DownloadButton
+                          onDownload={() => downloadPdf(mrpPdfBytes, `MRP_Only_Labels_${today}.pdf`)}
+                          tickSize="h-4 w-4"
+                          className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-purple-600 text-white text-sm rounded-md hover:bg-purple-700 transition-colors"
+                        >
+                          <Download className="w-4 h-4" /> Download
+                        </DownloadButton>
+                      </div>
+                    ) : (
+                      <div className="px-4 py-3 bg-gray-50 border border-dashed border-gray-300 rounded-lg text-sm text-gray-400 text-center">
+                        Click Generate to create MRP-only labels
+                      </div>
+                    )}
+                  </div>
+                  )}
+
+                  </div>
+                  {/* Right column — brand-wise labels */}
+                  {flags.showBrandWiseLabels && (
+                    <div className="flex-1 min-w-0">
+                      <BrandWiseLabels
+                        physicalItems={physicalItems}
+                        masterData={masterData}
+                        nutritionData={nutritionData}
+                        show4x6Vertical={flags.show4x6Vertical}
+                        showMrpOnlyLabels={flags.showMrpOnlyLabels}
+                      />
+                    </div>
+                  )}
                 </div>
+              ) : (
+                <EmptyState
+                  icon={<Tag className="h-10 w-10 text-gray-300" />}
+                  title="No labels yet"
+                  description="Process invoice PDFs to generate labels"
+                  action={{ label: 'Go to Upload', onClick: () => setActiveTab('upload') }}
+                />
               )}
             </div>
           )}
+
         </div>
       </div>
     </div>

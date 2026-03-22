@@ -34,21 +34,32 @@ export const generateReportPDF = (
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
   
-  // Set font
+  // Add page numbers on every page
+  const totalPagesExp = (doc as any).internal.getNumberOfPages;
   doc.setFont('helvetica');
-  
+
   // Title
-  doc.setFontSize(16);
+  doc.setFontSize(18);
   doc.setFont('helvetica', 'bold');
+  doc.setTextColor(30, 30, 30);
   const titleWidth = doc.getTextWidth(title);
-  doc.text(title, (pageWidth - titleWidth) / 2, 15);
-  
-  // Statistics summary
+  doc.text(title, (pageWidth - titleWidth) / 2, 14);
+
+  // Stats bar with light blue background
+  const statsText = `Total Orders: ${stats.totalOrders}   |   Multi-Item Orders: ${stats.multiItemCount}   |   Single-Item Orders: ${stats.singleItemCount}`;
   doc.setFontSize(9);
   doc.setFont('helvetica', 'normal');
-  const statsText = `Total Orders: ${stats.totalOrders} | Multi-Item Orders: ${stats.multiItemCount} | Single-Item Orders: ${stats.singleItemCount}`;
-  doc.text(statsText, 10, 22);
-  
+  const statsTextWidth = doc.getTextWidth(statsText);
+  const statsBoxX = (pageWidth - statsTextWidth - 10) / 2;
+  const statsBoxY = 17;
+  const statsBoxH = 7;
+  doc.setFillColor(219, 234, 254); // Light blue
+  doc.setDrawColor(147, 197, 253);
+  doc.setLineWidth(0.3);
+  doc.roundedRect(statsBoxX, statsBoxY, statsTextWidth + 10, statsBoxH, 1.5, 1.5, 'FD');
+  doc.setTextColor(30, 64, 175); // Blue text
+  doc.text(statsText, statsBoxX + 5, statsBoxY + 4.8);
+
   let yPos = 30;
   const lineHeight = 6;
   const margin = 10;
@@ -79,83 +90,56 @@ export const generateReportPDF = (
   if (multiItemOrders.length > 0) {
     yPos = addSectionHeader(doc, '*** SECTION 1: MULTI-ITEM ORDERS (Pack Complete Orders)', yPos, margin, maxWidth);
     yPos += 2;
-    
-    // Warning (full-width)
+
     doc.setFontSize(10);
-    doc.setTextColor(255, 0, 0); // Red
+    doc.setTextColor(255, 0, 0);
     doc.setFont('helvetica', 'bold');
     const warningText = '[CRITICAL] Each order below contains multiple items - PACK ALL ITEMS TOGETHER';
     const warningLines = doc.splitTextToSize(warningText, maxWidth);
     doc.text(warningLines, margin, yPos);
     yPos += warningLines.length * lineHeight + 3;
-    
-    // Prepare blocks for 2-column rendering
+
     const multiItemBlocks = multiItemOrders.map(trackingId => {
       const orderItems = ordersByTrackingId.get(trackingId) || [];
       return {
-        render: (x: number, y: number, width: number) => {
-          return renderMultiItemOrderBlock(doc, x, y, width, trackingId, orderItems, pageHeight);
-        },
-        estimateHeight: () => {
-          // Header (6mm) + table header (7mm) + rows (6mm each) + warning row (6mm) + spacing (4mm)
-          return 6 + 7 + (orderItems.length + 1) * 6 + 4;
-        }
+        render: (x: number, y: number, width: number) =>
+          renderMultiItemOrderBlock(doc, x, y, width, trackingId, orderItems, pageHeight),
+        estimateHeight: () => 6 + 7 + (orderItems.length + 1) * 6 + 4
       };
     });
-    
-    // Render in 2-column layout
-    renderTwoColumnBlocks(doc, multiItemBlocks, {
-      startY: yPos,
-      pageHeight,
-      leftMargin: margin,
-      rightMargin: margin,
-      gutter: 7,
-      blockGap: 5
+
+    yPos = renderTwoColumnBlocks(doc, multiItemBlocks, {
+      startY: yPos, pageHeight, leftMargin: margin, rightMargin: margin, gutter: 7, blockGap: 5
     });
-    
-    // Start new page for Section 2
-    doc.addPage();
-    yPos = 20;
+    yPos += 6;
+    // Divider line between sections
+    doc.setDrawColor(200, 200, 200);
+    doc.setLineWidth(0.5);
+    doc.line(margin, yPos, pageWidth - margin, yPos);
+    yPos += 6;
   } else {
-    // No multi-item orders, continue on same page
     yPos += 3;
   }
-  
+
   // Section 2: Single-item orders grouped by product (2-column layout)
+  if (yPos + 30 > pageHeight - 20) {
+    doc.addPage();
+    yPos = 15;
+  }
+
   yPos = addSectionHeader(doc, 'SECTION 2: SINGLE-ITEM ORDERS (Group by Product)', yPos, margin, maxWidth);
   yPos += 2;
-  
-  // Filter single-item orders using precomputed Set
+
   const singleItemOrders = orders.filter(o => !multiItemSet.has(o['tracking-id']));
-  
   if (singleItemOrders.length > 0) {
-    // Group by product
     const grouped = groupByProduct(singleItemOrders);
-    
-    // Prepare blocks for 2-column rendering
-    const productBlocks = Array.from(grouped.entries()).map(([productName, groupOrders]) => {
-      const firstOrder = groupOrders[0];
-      const productNameStr = firstOrder['product-name'] || productName;
-      return {
-        render: (x: number, y: number, width: number) => {
-          return renderProductGroupBlock(doc, x, y, width, productNameStr, groupOrders, pageHeight);
-        },
-        estimateHeight: () => {
-          // Accurate estimate matching actual rendering:
-          // header (6mm) + tableHeader (7mm) + rows (rowCount * 6mm) + afterTable (2mm) + blockGap (2mm)
-          return 6 + 7 + groupOrders.length * 6 + 2 + 2;
-        }
-      };
-    });
-    
-    // Render in 2-column masonry layout (Section 2 only)
+    const productBlocks = Array.from(grouped.entries()).map(([productName, groupOrders]) => ({
+      render: (x: number, y: number, width: number) =>
+        renderProductGroupBlock(doc, x, y, width, groupOrders[0]['product-name'] || productName, groupOrders, pageHeight),
+      estimateHeight: () => 6 + 7 + groupOrders.length * 6 + 2 + 2
+    }));
     renderTwoColumnBlocksMasonry(doc, productBlocks, {
-      startY: yPos,
-      pageHeight,
-      leftMargin: margin,
-      rightMargin: margin,
-      gutter: 7,
-      blockGap: 2
+      startY: yPos, pageHeight, leftMargin: margin, rightMargin: margin, gutter: 7, blockGap: 2
     });
   } else {
     doc.setFontSize(10);
@@ -165,6 +149,17 @@ export const generateReportPDF = (
     yPos += lineHeight;
   }
   
+  // Add page numbers to all pages
+  const totalPages = (doc as any).internal.getNumberOfPages();
+  for (let i = 1; i <= totalPages; i++) {
+    doc.setPage(i);
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(150, 150, 150);
+    const pageText = `Page ${i} of ${totalPages}`;
+    doc.text(pageText, pageWidth - margin - doc.getTextWidth(pageText), pageHeight - 5);
+  }
+
   // Convert to Uint8Array
   const pdfBlob = doc.output('arraybuffer');
   return new Uint8Array(pdfBlob);
@@ -293,12 +288,12 @@ const renderProductGroupBlock = (
   const lineHeight = 6;
   let currentY = y;
   
-  // Product header (tighter spacing for Section 2)
-  doc.setFontSize(11);
+  // Product header
+  doc.setFontSize(12);
   doc.setTextColor(0, 0, 139); // Dark blue
   doc.setFont('helvetica', 'bold');
   doc.text(productName.toUpperCase(), x, currentY);
-  currentY += lineHeight; // Reduced from lineHeight + 1
+  currentY += lineHeight + 1; // Reduced from lineHeight + 1
   
   // Orders table
   const tableData: string[][] = [['Tracking ID', 'Qty', 'Pickup Date']];
@@ -310,8 +305,57 @@ const renderProductGroupBlock = (
   
   // Render table with compact spacing, pass startY as topMarginY for column mode
   currentY = addTable(doc, tableData, x, currentY, width, lineHeight, pageHeight, x, true, y);
-  
+
   return currentY + 2; // Reduced block spacing for Section 2
+};
+
+/**
+ * Render a product group block with multi-item warnings column
+ */
+const renderProductGroupBlockWithWarnings = (
+  doc: jsPDF,
+  x: number,
+  y: number,
+  width: number,
+  productName: string,
+  groupOrders: ProcessedOrder[],
+  multiItemSet: Set<string>,
+  ordersByTrackingId: Map<string, ProcessedOrder[]>,
+  pageHeight: number
+): number => {
+  const lineHeight = 6;
+  let currentY = y;
+
+  doc.setFontSize(11);
+  doc.setTextColor(0, 0, 139);
+  doc.setFont('helvetica', 'bold');
+  doc.text(productName.toUpperCase(), x, currentY);
+  currentY += lineHeight;
+
+  const tableData: string[][] = [['Tracking ID', 'Qty', 'Pickup', 'Order Type']];
+  const rowHighlights: boolean[] = [];
+
+  for (const order of groupOrders) {
+    const trackingId = order['tracking-id'];
+    const shortId = trackingId.length > 12 ? trackingId.substring(trackingId.length - 12) : trackingId;
+    const isMulti = multiItemSet.has(trackingId);
+    let orderType = isMulti ? 'MULTI-ITEM' : 'Single Item';
+
+    if (isMulti) {
+      const otherItems = (ordersByTrackingId.get(trackingId) || [])
+        .filter(o => o['product-name'] !== productName)
+        .map(o => o['product-name'].substring(0, 15));
+      if (otherItems.length > 0) {
+        orderType += ` +${otherItems[0]}${otherItems.length > 1 ? '...' : ''}`;
+      }
+    }
+
+    tableData.push([shortId, String(order.qty), order['pickup-slot'].substring(0, 10), orderType.substring(0, 30)]);
+    rowHighlights.push(isMulti);
+  }
+
+  currentY = addTableWithRowHighlights(doc, tableData, rowHighlights, x, currentY, width, lineHeight, pageHeight, x, true, y);
+  return currentY + 2;
 };
 
 /**
@@ -351,12 +395,12 @@ const renderTwoColumnBlocksMasonry = (
     const estimatedHeight = block.estimateHeight ? block.estimateHeight() : 50;
     const availableHeight = pageHeight - bottomMargin - y;
     
-    // If block doesn't fit, add new page and reset both columns
+    // If block doesn't fit, add new page and reset both columns to top margin
     if (estimatedHeight > availableHeight) {
       doc.addPage();
-      yLeft = startY;
-      yRight = startY;
-      y = startY; // Recompute y for chosen column
+      yLeft = 15;
+      yRight = 15;
+      y = 15;
     }
     
     // Render block (now we know it will fit)
@@ -386,7 +430,7 @@ const renderTwoColumnBlocks = (
     gutter: number;
     blockGap: number;
   }
-): void => {
+): number => {
   const { startY, pageHeight, leftMargin, rightMargin, gutter, blockGap } = options;
   const pageWidth = doc.internal.pageSize.getWidth();
   const columnWidth = (pageWidth - leftMargin - rightMargin - gutter) / 2;
@@ -452,6 +496,7 @@ const renderTwoColumnBlocks = (
     // Advance to max Y of both blocks for next pair
     yCurrent = Math.max(leftFinalY, rightFinalY) + blockGap;
   }
+  return yCurrent;
 };
 
 /**
@@ -582,8 +627,8 @@ const addTable = (
       const isHighQty = qty > 1;
       
       if (isHighQty) {
-        // Light grey background for entire row
-        doc.setFillColor(240, 240, 240);
+        // Amber background for high-qty rows — easy to spot at a glance
+        doc.setFillColor(254, 243, 199);
         doc.rect(tableStartX, currentY, totalTableWidth, rowHeight, 'F');
       } else if (i % 2 === 0) {
         // Alternating row colors (even rows)
@@ -654,6 +699,119 @@ const addTable = (
   doc.rect(tableStartX, headerStartY, totalTableWidth, currentY - headerStartY, 'S');
   
   return currentY + 2; // Add minimal spacing after table
+};
+
+/**
+ * Like addTable but highlights specific data rows (e.g. multi-item rows in yellow)
+ * rowHighlights[i] corresponds to tableData[i+1] (skipping header row)
+ */
+const addTableWithRowHighlights = (
+  doc: jsPDF,
+  tableData: string[][],
+  rowHighlights: boolean[],
+  margin: number,
+  yPos: number,
+  maxWidth: number,
+  lineHeight: number,
+  pageHeight: number = 297,
+  xPosition?: number,
+  compactSpacing: boolean = false,
+  topMarginY: number = 20
+): number => {
+  if (tableData.length === 0) return yPos;
+
+  const colCount = tableData[0].length;
+  const compactMaxWidth = xPosition !== undefined ? maxWidth : maxWidth * 0.9;
+  const colWidths = calculateColumnWidths(tableData, compactMaxWidth, doc);
+  const totalTableWidth = colWidths.reduce((sum, w) => sum + w, 0);
+  const tableStartX = xPosition !== undefined ? xPosition : margin;
+  const rowHeight = 6;
+  const headerHeight = 7;
+  const cellPadding = compactSpacing ? 1.5 : 2;
+
+  const headerStartY = yPos;
+  let currentY = headerStartY;
+
+  // Draw header
+  doc.setFillColor(240, 240, 240);
+  doc.rect(tableStartX, headerStartY, totalTableWidth, headerHeight, 'F');
+  doc.setDrawColor(200, 200, 200); doc.setLineWidth(0.5);
+  doc.rect(tableStartX, headerStartY, totalTableWidth, headerHeight, 'S');
+  doc.setFontSize(9); doc.setFont('helvetica', 'bold'); doc.setTextColor(0, 0, 0);
+  let xPos = tableStartX;
+  for (let j = 0; j < colCount; j++) {
+    doc.text(tableData[0][j] || '', xPos + colWidths[j] / 2, headerStartY + headerHeight - 2, { align: 'center' });
+    if (j < colCount - 1) { doc.setLineWidth(0.25); doc.line(xPos + colWidths[j], headerStartY, xPos + colWidths[j], headerStartY + headerHeight); }
+    xPos += colWidths[j];
+  }
+  doc.setLineWidth(0.5);
+  doc.line(tableStartX, headerStartY + headerHeight, tableStartX + totalTableWidth, headerStartY + headerHeight);
+  currentY = headerStartY + headerHeight;
+
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9);
+
+  for (let i = 1; i < tableData.length; i++) {
+    const row = tableData[i];
+    const isHighlighted = rowHighlights[i - 1];
+
+    if (currentY + rowHeight > pageHeight - 20) {
+      doc.addPage();
+      currentY = topMarginY;
+      doc.setFillColor(240, 240, 240);
+      doc.rect(tableStartX, currentY, totalTableWidth, headerHeight, 'F');
+      doc.setDrawColor(200, 200, 200); doc.setLineWidth(0.5);
+      doc.rect(tableStartX, currentY, totalTableWidth, headerHeight, 'S');
+      doc.setFontSize(9); doc.setFont('helvetica', 'bold'); doc.setTextColor(0, 0, 0);
+      xPos = tableStartX;
+      for (let j = 0; j < colCount; j++) {
+        doc.text(tableData[0][j] || '', xPos + colWidths[j] / 2, currentY + headerHeight - 2, { align: 'center' });
+        if (j < colCount - 1) { doc.setLineWidth(0.25); doc.line(xPos + colWidths[j], currentY, xPos + colWidths[j], currentY + headerHeight); }
+        xPos += colWidths[j];
+      }
+      doc.setLineWidth(0.5);
+      doc.line(tableStartX, currentY + headerHeight, tableStartX + totalTableWidth, currentY + headerHeight);
+      currentY = currentY + headerHeight;
+      doc.setFont('helvetica', 'normal');
+    }
+
+    if (isHighlighted) {
+      doc.setFillColor(255, 255, 180); // Light yellow for multi-item rows
+      doc.rect(tableStartX, currentY, totalTableWidth, rowHeight, 'F');
+    } else if (i % 2 === 0) {
+      doc.setFillColor(249, 250, 251);
+      doc.rect(tableStartX, currentY, totalTableWidth, rowHeight, 'F');
+    }
+
+    xPos = tableStartX;
+    for (let j = 0; j < colCount; j++) {
+      const cellText = row[j] || '';
+      const isLastCol = j === colCount - 1;
+      const align = (!isLastCol && ((/^\d+$/.test(cellText.trim())) || cellText.length < 15)) ? 'center' : 'left';
+
+      if (isHighlighted && j === colCount - 1) {
+        doc.setTextColor(200, 0, 0); doc.setFont('helvetica', 'bold');
+      } else {
+        doc.setTextColor(0, 0, 0); doc.setFont('helvetica', 'normal');
+      }
+
+      const textX = align === 'center' ? xPos + colWidths[j] / 2 : xPos + cellPadding;
+      doc.text(cellText, textX, currentY + rowHeight / 2 + 1.5, { align });
+
+      if (j < colCount - 1) {
+        doc.setDrawColor(229, 231, 235); doc.setLineWidth(0.25);
+        doc.line(xPos + colWidths[j], currentY, xPos + colWidths[j], currentY + rowHeight);
+      }
+      xPos += colWidths[j];
+    }
+
+    doc.setDrawColor(229, 231, 235); doc.setLineWidth(0.25);
+    doc.line(tableStartX, currentY + rowHeight, tableStartX + totalTableWidth, currentY + rowHeight);
+    currentY += rowHeight;
+  }
+
+  doc.setDrawColor(200, 200, 200); doc.setLineWidth(0.5);
+  doc.rect(tableStartX, headerStartY, totalTableWidth, currentY - headerStartY, 'S');
+  return currentY + 2;
 };
 
 /**

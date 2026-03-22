@@ -22,7 +22,7 @@ export const useConfirm = () => {
   if (!context) {
     throw new Error('useConfirm must be used within DialogProvider');
   }
-  return context;
+  return context.confirm;
 };
 
 interface DialogProviderProps {

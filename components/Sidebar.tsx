@@ -1,15 +1,19 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
+import { Bars3Icon, XMarkIcon } from '@heroicons/react/24/outline';
 import {
-  TagIcon,
-  ShoppingBagIcon,
-  Bars3Icon,
-  XMarkIcon,
-  ChevronDownIcon,
-  ChevronRightIcon,
-} from '@heroicons/react/24/outline';
-import { Package, BarChart3 } from 'lucide-react';
+  Tag,
+  Truck,
+  BarChart3,
+  ClipboardList,
+  ShoppingCart,
+  Store,
+  Globe,
+  Layers,
+  ShieldCheck,
+} from 'lucide-react';
+import { useAdmin } from '../contexts/AdminContext';
 
-export type ViewType = 
+export type ViewType =
   | 'label-generator'
   | 'us-label-generator'
   | 'product-label-generator'
@@ -18,105 +22,81 @@ export type ViewType =
   | 'flipkart-packing-plan'
   | 'flipkart-easy-ship'
   | 'manual-packing-plan'
-  | 'packed-unit-stock';
+  | 'packed-unit-stock'
+  | 'admin';
 
 interface SidebarProps {
   activeView: ViewType;
   onViewChange: (view: ViewType) => void;
 }
 
+interface NavItem {
+  id: ViewType;
+  label: string;
+  icon: React.ElementType;
+}
+
+interface NavSection {
+  label: string;
+  items: NavItem[];
+}
+
 const Sidebar: React.FC<SidebarProps> = ({ activeView, onViewChange }) => {
   const [isOpen, setIsOpen] = useState(false);
-  
-  // Persist accordion state in localStorage
-  const getInitialAccordionState = (): number | null => {
-    const saved = localStorage.getItem('sidebar-accordion-state');
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      // Auto-open if a submenu item is active
-      if (activeView === 'amazon-packing-plan' || activeView === 'amazon-easy-ship') {
-        return 1;
-      }
-      if (activeView === 'flipkart-packing-plan' || activeView === 'flipkart-easy-ship') {
-        return 2;
-      }
-      return parsed;
-    }
-    // Default: open Amazon and Flipkart accordions
-    if (activeView === 'amazon-packing-plan' || activeView === 'amazon-easy-ship') {
-      return 1;
-    }
-    if (activeView === 'flipkart-packing-plan' || activeView === 'flipkart-easy-ship') {
-      return 2;
-    }
-    return null;
-  };
-
-  const [openAccordion, setOpenAccordion] = useState<number | null>(getInitialAccordionState);
-
-  // Auto-open accordion when a submenu item is active
-  useEffect(() => {
-    if (activeView === 'amazon-packing-plan' || activeView === 'amazon-easy-ship') {
-      setOpenAccordion(1);
-    } else if (activeView === 'flipkart-packing-plan' || activeView === 'flipkart-easy-ship') {
-      setOpenAccordion(2);
-    }
-  }, [activeView]);
-
-  // Persist accordion state
-  useEffect(() => {
-    localStorage.setItem('sidebar-accordion-state', JSON.stringify(openAccordion));
-  }, [openAccordion]);
-
-  const handleAccordionToggle = (index: number) => {
-    setOpenAccordion(openAccordion === index ? null : index);
-  };
+  const { flags } = useAdmin();
 
   const handleViewChange = (view: ViewType) => {
     onViewChange(view);
-    setIsOpen(false); // Close sidebar on mobile after selection
+    setIsOpen(false);
   };
 
-  const menuItems = [
+  const sections: NavSection[] = [
     {
-      id: 'label-generator' as ViewType,
-      label: 'Label Generator',
-      icon: TagIcon,
-      hasSubmenu: false,
+      label: 'Labels',
+      items: [
+        { id: 'label-generator', label: 'Label Generator', icon: Tag },
+        { id: 'us-label-generator', label: 'US Label Generator', icon: Globe },
+        { id: 'product-label-generator', label: 'Product Labels', icon: Layers },
+      ],
+    },
+    {
+      label: 'Amazon',
+      items: [
+        { id: 'amazon-packing-plan', label: 'Packing Plan', icon: ShoppingCart },
+        { id: 'amazon-easy-ship', label: 'Easy Ship Report', icon: Truck },
+      ],
+    },
+    {
+      label: 'Flipkart',
+      items: [
+        { id: 'flipkart-packing-plan', label: 'Packing Plan', icon: Store },
+        { id: 'flipkart-easy-ship', label: 'Easy Ship Report', icon: Truck },
+      ],
+    },
+    {
+      label: 'Tools',
+      items: [
+        ...(flags.showManualPackingPlan ? [{ id: 'manual-packing-plan' as ViewType, label: 'Manual Packing Plan', icon: ClipboardList }] : []),
+        ...(flags.showPackedUnitStock ? [{ id: 'packed-unit-stock' as ViewType, label: 'Packed Unit Stock', icon: BarChart3 }] : []),
+      ],
     },
   ];
 
-  const amazonItems = [
-    { id: 'amazon-packing-plan' as ViewType, label: 'Amazon Packing Plan' },
-    { id: 'amazon-easy-ship' as ViewType, label: 'Amazon Easyship Report' },
-  ];
-
-  const flipkartItems = [
-    { id: 'flipkart-packing-plan' as ViewType, label: 'Flipkart Packing Plan' },
-    { id: 'flipkart-easy-ship' as ViewType, label: 'Flipkart Easyship Report' },
-  ];
-
-  const isActive = (viewId: ViewType) => activeView === viewId;
-
   return (
     <>
-      {/* Mobile Menu Button */}
+      {/* Mobile toggle */}
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="lg:hidden fixed top-4 left-4 z-50 p-2 rounded-md bg-white shadow-md border border-gray-200 hover:bg-gray-50"
+        className="lg:hidden fixed top-4 left-4 z-50 p-2 rounded-lg bg-white shadow-md border border-gray-200 hover:bg-gray-50 transition-colors"
         aria-label="Toggle menu"
       >
-        {isOpen ? (
-          <XMarkIcon className="h-6 w-6 text-gray-700" />
-        ) : (
-          <Bars3Icon className="h-6 w-6 text-gray-700" />
-        )}
+        {isOpen ? <XMarkIcon className="h-5 w-5 text-gray-700" /> : <Bars3Icon className="h-5 w-5 text-gray-700" />}
       </button>
 
-      {/* Overlay for mobile */}
+      {/* Mobile overlay */}
       {isOpen && (
         <div
-          className="lg:hidden fixed inset-0 bg-black bg-opacity-50 z-40"
+          className="lg:hidden fixed inset-0 bg-black/40 z-40 backdrop-blur-sm"
           onClick={() => setIsOpen(false)}
         />
       )}
@@ -125,226 +105,74 @@ const Sidebar: React.FC<SidebarProps> = ({ activeView, onViewChange }) => {
       <aside
         className={`
           fixed lg:static inset-y-0 left-0 z-40
-          w-64 bg-white shadow-xl lg:shadow-none
+          w-56 bg-white border-r border-gray-200
           transform transition-transform duration-300 ease-in-out
           ${isOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
-          flex flex-col
+          flex flex-col shrink-0
         `}
       >
-        {/* Logo/Brand */}
-        <div className="flex items-center gap-3 p-4 border-b border-gray-200">
-          <Package className="w-6 h-6 text-blue-600" />
-          <h2 className="text-lg font-bold text-gray-900">Mithila Tools</h2>
+        {/* Brand */}
+        <div className="flex items-center gap-2.5 px-4 py-4 border-b border-gray-100">
+          <img src="/leaf.png" alt="Mithila Tools" className="w-7 h-7 object-contain" />
+          <span className="text-base font-bold text-gray-900 tracking-tight">Mithila Tools</span>
         </div>
 
-        {/* Navigation */}
-        <nav className="flex-1 overflow-y-auto py-4">
-          <ul className="space-y-1 px-2">
-            {/* Label Generator */}
-            <li>
-              <button
-                onClick={() => handleViewChange('label-generator')}
-                className={`
-                  w-full flex items-center gap-3 px-3 py-2 rounded-md text-left
-                  transition-colors
-                  ${
-                    isActive('label-generator')
-                      ? 'bg-blue-50 text-blue-700 font-medium'
-                      : 'text-gray-700 hover:bg-gray-50'
-                  }
-                `}
-              >
-                <TagIcon className="h-5 w-5" />
-                <span>Label Generator</span>
-              </button>
-            </li>
-
-            {/* US Label Generator */}
-            <li>
-              <button
-                onClick={() => handleViewChange('us-label-generator')}
-                className={`
-                  w-full flex items-center gap-3 px-3 py-2 rounded-md text-left
-                  transition-colors
-                  ${
-                    isActive('us-label-generator')
-                      ? 'bg-blue-50 text-blue-700 font-medium'
-                      : 'text-gray-700 hover:bg-gray-50'
-                  }
-                `}
-              >
-                <TagIcon className="h-5 w-5" />
-                <span>US Label Generator</span>
-              </button>
-            </li>
-
-            {/* Product Label Generator */}
-            <li>
-              <button
-                onClick={() => handleViewChange('product-label-generator')}
-                className={`
-                  w-full flex items-center gap-3 px-3 py-2 rounded-md text-left
-                  transition-colors
-                  ${
-                    isActive('product-label-generator')
-                      ? 'bg-blue-50 text-blue-700 font-medium'
-                      : 'text-gray-700 hover:bg-gray-50'
-                  }
-                `}
-              >
-                <TagIcon className="h-5 w-5" />
-                <span>Product Label Generator</span>
-              </button>
-            </li>
-
-            {/* Separator */}
-            <li className="my-2">
-              <hr className="border-gray-200" />
-            </li>
-
-            {/* Amazon Accordion */}
-            <li>
-              <button
-                onClick={() => handleAccordionToggle(1)}
-                className={`w-full flex items-center justify-between px-3 py-2 rounded-md transition-colors ${
-                  activeView === 'amazon-packing-plan' || activeView === 'amazon-easy-ship'
-                    ? 'bg-blue-50 text-blue-700'
-                    : 'text-gray-700 hover:bg-gray-50'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <ShoppingBagIcon className="h-5 w-5" />
-                  <span className="font-medium">Amazon Easy Ship</span>
-                </div>
-                {openAccordion === 1 ? (
-                  <ChevronDownIcon className="h-4 w-4" />
-                ) : (
-                  <ChevronRightIcon className="h-4 w-4" />
-                )}
-              </button>
-              {openAccordion === 1 && (
-                <ul className="ml-8 mt-1 space-y-1">
-                  {amazonItems.map((item) => (
-                    <li key={item.id}>
-                      <button
-                        onClick={() => handleViewChange(item.id)}
-                        className={`
-                          w-full flex items-center gap-2 px-3 py-2 rounded-md text-left text-sm
-                          transition-colors
-                          ${
-                            isActive(item.id)
-                              ? 'bg-blue-50 text-blue-700 font-medium'
-                              : 'text-gray-600 hover:bg-gray-50'
-                          }
-                        `}
-                      >
-                        <ChevronRightIcon className="h-3 w-3" />
-                        <span>{item.label}</span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </li>
-
-            {/* Separator */}
-            <li className="my-2">
-              <hr className="border-gray-200" />
-            </li>
-
-            {/* Manual Packing Plan */}
-            <li>
-              <button
-                onClick={() => handleViewChange('manual-packing-plan')}
-                className={`
-                  w-full flex items-center gap-3 px-3 py-2 rounded-md text-left
-                  transition-colors
-                  ${
-                    isActive('manual-packing-plan')
-                      ? 'bg-blue-50 text-blue-700 font-medium'
-                      : 'text-gray-700 hover:bg-gray-50'
-                  }
-                `}
-              >
-                <Package className="h-5 w-5" />
-                <span>Manual Packing Plan</span>
-              </button>
-            </li>
-
-            {/* Packed Unit Stock */}
-            <li>
-              <button
-                onClick={() => handleViewChange('packed-unit-stock')}
-                className={`
-                  w-full flex items-center gap-3 px-3 py-2 rounded-md text-left
-                  transition-colors
-                  ${
-                    isActive('packed-unit-stock')
-                      ? 'bg-blue-50 text-blue-700 font-medium'
-                      : 'text-gray-700 hover:bg-gray-50'
-                  }
-                `}
-              >
-                <BarChart3 className="h-5 w-5" />
-                <span>Packed Unit Stock</span>
-              </button>
-            </li>
-
-            {/* Separator */}
-            <li className="my-2">
-              <hr className="border-gray-200" />
-            </li>
-
-            {/* Flipkart Accordion */}
-            <li>
-              <button
-                onClick={() => handleAccordionToggle(2)}
-                className={`w-full flex items-center justify-between px-3 py-2 rounded-md transition-colors ${
-                  activeView === 'flipkart-packing-plan' || activeView === 'flipkart-easy-ship'
-                    ? 'bg-blue-50 text-blue-700'
-                    : 'text-gray-700 hover:bg-gray-50'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <ShoppingBagIcon className="h-5 w-5" />
-                  <span className="font-medium">Flipkart</span>
-                </div>
-                {openAccordion === 2 ? (
-                  <ChevronDownIcon className="h-4 w-4" />
-                ) : (
-                  <ChevronRightIcon className="h-4 w-4" />
-                )}
-              </button>
-              {openAccordion === 2 && (
-                <ul className="ml-8 mt-1 space-y-1">
-                  {flipkartItems.map((item) => (
-                    <li key={item.id}>
-                      <button
-                        onClick={() => handleViewChange(item.id)}
-                        className={`
-                          w-full flex items-center gap-2 px-3 py-2 rounded-md text-left text-sm
-                          transition-colors
-                          ${
-                            isActive(item.id)
-                              ? 'bg-blue-50 text-blue-700 font-medium'
-                              : 'text-gray-600 hover:bg-gray-50'
-                          }
-                        `}
-                      >
-                        <ChevronRightIcon className="h-3 w-3" />
-                        <span>{item.label}</span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </li>
-          </ul>
+        {/* Nav */}
+        <nav className="flex-1 overflow-y-auto py-3 px-2">
+          {sections.map((section, sIdx) => (
+            section.items.length > 0 && (
+              <div key={section.label} className={sIdx > 0 ? 'mt-4' : ''}>
+                <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+                  {section.label}
+                </p>
+                {section.items.map((item) => {
+                  const Icon = item.icon;
+                  const active = activeView === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => handleViewChange(item.id)}
+                      className={`
+                        w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left text-sm mb-0.5
+                        transition-colors
+                        ${active
+                          ? 'bg-blue-50 text-blue-700 font-medium'
+                          : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+                        }
+                      `}
+                    >
+                      <Icon className={`h-4 w-4 flex-shrink-0 ${active ? 'text-blue-600' : 'text-gray-400'}`} />
+                      <span className="truncate">{item.label}</span>
+                      {active && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-blue-500" />}
+                    </button>
+                  );
+                })}
+              </div>
+            )
+          ))}
         </nav>
+
+        {/* Admin — pinned at bottom */}
+        <div className="px-2 py-3 border-t border-gray-100">
+          <button
+            onClick={() => handleViewChange('admin')}
+            className={`
+              w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left text-sm
+              transition-colors
+              ${activeView === 'admin'
+                ? 'bg-gray-900 text-white font-medium'
+                : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800'
+              }
+            `}
+          >
+            <ShieldCheck className={`h-4 w-4 flex-shrink-0 ${activeView === 'admin' ? 'text-white' : 'text-gray-400'}`} />
+            <span className="truncate">Admin</span>
+            {activeView === 'admin' && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-white" />}
+          </button>
+        </div>
       </aside>
     </>
   );
 };
 
 export default Sidebar;
-

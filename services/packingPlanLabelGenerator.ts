@@ -2,6 +2,7 @@ import { PDFDocument } from 'pdf-lib';
 import { PhysicalItem, MasterProduct, NutritionData } from '../types';
 import {
   generateCombinedLabelHorizontal,
+  generateCombinedVerticalSticker,
   generateTripleLabel,
   generateMRPLabel
 } from './pdfGenerator';
@@ -319,6 +320,67 @@ export const generateLabelsByPacketUsed = async (
     houseCount,
     skippedProducts
   };
+};
+
+/**
+ * Generate Combined Vertical Sticker labels (2 pages per label: MRP + Barcode, each 50x25mm)
+ * Generated only for sticker items (same set as the Combined Sticker label)
+ */
+export const generateCombinedVerticalLabels = async (
+  physicalItems: PhysicalItem[],
+  masterData: MasterProduct[]
+): Promise<{
+  combinedVerticalPdfBytes: Uint8Array | null;
+  combinedVerticalCount: number;
+}> => {
+  const eligibleItems = physicalItems.filter(item => {
+    const fnsku = String(item.FNSKU || '').trim();
+    const packetUsed = String(item['Packet used'] || '').trim().toLowerCase();
+    return packetUsed === 'sticker' &&
+      fnsku && fnsku !== 'MISSING' && !isEmptyValue(fnsku);
+  });
+
+  if (eligibleItems.length === 0) {
+    return { combinedVerticalPdfBytes: null, combinedVerticalCount: 0 };
+  }
+
+  const outputPdf = await PDFDocument.create();
+  let combinedVerticalCount = 0;
+
+  for (const row of eligibleItems) {
+    const fnsku = String(row.FNSKU || '').trim();
+    const qty = row.Qty || 0;
+    const productName = row.item_name_for_labels || row.item || '';
+
+    const masterProduct = masterData.find(p => p.FNSKU === fnsku || p.ASIN === row.ASIN);
+    if (!masterProduct) continue;
+
+    const productForLabel: MasterProduct = {
+      ...masterProduct,
+      'item_name_for_labels': productName || masterProduct.Name || '',
+      FNSKU: fnsku || masterProduct.FNSKU || ''
+    };
+
+    for (let i = 0; i < qty; i++) {
+      try {
+        const labelPdf = generateCombinedVerticalSticker(productForLabel);
+        const labelBytes = labelPdf.output('arraybuffer');
+        const labelDoc = await PDFDocument.load(labelBytes);
+        // Copy both pages (page 0 = MRP, page 1 = Barcode)
+        const pageCount = labelDoc.getPageCount();
+        for (let p = 0; p < pageCount; p++) {
+          const [copiedPage] = await outputPdf.copyPages(labelDoc, [p]);
+          outputPdf.addPage(copiedPage);
+        }
+        combinedVerticalCount++;
+      } catch (error) {
+        console.warn(`Could not generate Combined Vertical label for ${productName}:`, error);
+      }
+    }
+  }
+
+  const pdfBytes = combinedVerticalCount > 0 ? await outputPdf.save() : null;
+  return { combinedVerticalPdfBytes: pdfBytes, combinedVerticalCount };
 };
 
 /**
