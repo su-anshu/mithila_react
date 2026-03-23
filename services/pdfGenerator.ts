@@ -565,126 +565,110 @@ export const generateTripleLabel = async (product: MasterProduct, nutrition: Nut
     format: [TRIPLE_WIDTH, TRIPLE_HEIGHT]
   });
 
-  // Register custom fonts on this document instance (required for each new jsPDF instance)
   const helveticaBlackAvailable = await registerCustomFonts(doc);
 
   const startX = 2;
   const endX = TRIPLE_WIDTH - 2;
   const contentWidth = TRIPLE_WIDTH - 4; // 46mm
-  let cursorY = 4;
+
+  // Fixed section boundaries matching house_label.pdf exactly
+  const SEC1_LINE = 23;  // separator line 1 at y=23mm
+  const SEC2_START = 24; // section 2 starts at 24mm
+  const SEC2_LINE = 61;  // separator line 2 at y=61mm
+  const SEC3_START = 62; // section 3 starts at 62mm
 
   const productName = product['item_name_for_labels'] || product.Name || 'Unknown';
 
-  // --- 1. Top Section: Title & Ingredients ---
+  // ─── SECTION 1: Name + Ingredients + Allergen (0–23mm) ──────────────────────
 
-  // Title (Bold, Larger)
-  doc.setFont("Helvetica-Black", "normal");
+  let cursorY = 4;
+
+  // Title — bold, centered
+  if (helveticaBlackAvailable) {
+    doc.setFont("Helvetica-Black", "normal");
+  } else {
+    doc.setFont("helvetica", "bold");
+  }
   doc.setFontSize(7);
   const titleLines = doc.splitTextToSize(productName, contentWidth);
   doc.text(titleLines, TRIPLE_WIDTH / 2, cursorY, { align: 'center' });
-  cursorY += (titleLines.length * 1.5) + 2;
+  cursorY += (titleLines.length * 2.2) + 1;
 
-  // Function to draw labeled paragraph: "Label: Text..." with mixed styles
+  // Labeled paragraph: bold label + normal wrapping text, 2mm line height
   const drawLabeledParagraph = (label: string, text: string, y: number): number => {
-    // We will treat the whole block as standard text to simplify and ensure wrapping works perfectly
-    // JSPDF mixed style wrapping is tricky. 
-    // Strategy: Print label bold, then print text normal starting after label width
-
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(5); // Reduced from 6 to match Python 5pt
+    doc.setFontSize(5);
     doc.text(label, startX, y);
-
     const labelWidth = doc.getTextWidth(label);
 
     doc.setFont("helvetica", "normal");
-
+    const spaceWidth = doc.getTextWidth(" ");
     const words = text.split(' ');
-    let line = "";
     let currentY = y;
     let currentX = startX + labelWidth;
 
-    // Safety check for space
-    const spaceWidth = doc.getTextWidth(" ");
-
-    for (let i = 0; i < words.length; i++) {
-      const word = words[i];
+    for (const word of words) {
       const wordWidth = doc.getTextWidth(word);
-
-      // Check if word fits on current line
       if (currentX + wordWidth <= endX) {
         doc.text(word, currentX, currentY);
         currentX += wordWidth + spaceWidth;
       } else {
-        // New line
-        currentY += 2.2; // Line height for 5pt font
+        currentY += 2.0;
         currentX = startX;
         doc.text(word, currentX, currentY);
         currentX += wordWidth + spaceWidth;
       }
     }
-    return currentY + 2.5; // Bottom margin
+    return currentY + 2.0;
   };
 
-  const ingredientsText = nutrition.Ingredients || "N/A";
-  cursorY = drawLabeledParagraph("Ingredients: ", ingredientsText, cursorY);
+  cursorY = drawLabeledParagraph("Ingredients: ", nutrition.Ingredients || "N/A", cursorY);
 
   const allergen = nutrition["Allergen Info"] || extractAllergenFromRow(nutrition);
   if (allergen) {
     cursorY = drawLabeledParagraph("Allergen Info: ", allergen, cursorY);
-  } else {
-    cursorY += 1;
   }
 
-  // Separator
-  doc.setLineWidth(0.2);
-  doc.line(2, cursorY, 48, cursorY);
-  cursorY += 3; // Add more space after separator line
+  // Separator line 1 — FIXED at y=23mm (matches house_label.pdf)
+  doc.setLineWidth(0.3);
+  doc.line(5, SEC1_LINE, 45, SEC1_LINE);
 
-  // --- 2. Nutrition Section ---
+  // ─── SECTION 2: Nutritional Facts (24mm–61mm) ────────────────────────────────
 
-  // Title - Use Helvetica-Black at 5pt (matching Python)
-  // Use Helvetica-Black if successfully registered, otherwise fallback to bold
+  cursorY = SEC2_START + 3.5;
+
+  // "Nutritional Facts Per 100g (Approx Values)"
   if (helveticaBlackAvailable) {
-    try {
-      doc.setFont("Helvetica-Black", "normal");
-    } catch (e) {
-      // If setFont fails even though registration succeeded, fallback
-      console.warn('Helvetica-Black registration succeeded but setFont failed, using bold fallback');
-      doc.setFont("helvetica", "bold");
-    }
+    doc.setFont("Helvetica-Black", "normal");
   } else {
-    // Font not available, use bold fallback
     doc.setFont("helvetica", "bold");
   }
   doc.setFontSize(5.5);
   doc.text("Nutritional Facts Per 100g (Approx Values)", TRIPLE_WIDTH / 2, cursorY, { align: 'center' });
-  cursorY += 3.5; // Increased spacing between title and serving size for better readability
+  cursorY += 3;
 
-  // Serving Size
+  // Serving size
   doc.setFont("helvetica", "bold");
   doc.setFontSize(6);
   const servingSize = nutrition["Serving Size"] || "30g";
   doc.text(`Serving size ${servingSize}`, TRIPLE_WIDTH / 2, cursorY, { align: 'center' });
   cursorY += 2.5;
 
-  // Serving Info (Small)
+  // Servings note
   doc.setFont("helvetica", "normal");
   doc.setFontSize(3.5);
   doc.text("Number of servings may vary based on pack size and intended use", TRIPLE_WIDTH / 2, cursorY, { align: 'center' });
-  cursorY += 3; // Reduced from 3mm to 2.5mm
+  cursorY += 2.5;
 
   // Energy
   doc.setFont("helvetica", "bold");
   doc.setFontSize(7);
   doc.text(`Energy Value - ${formatValue(nutrition.Energy || 345)} Kcal`, TRIPLE_WIDTH / 2, cursorY, { align: 'center' });
-  cursorY += 2.5; // Reduced from 3mm to 2.5mm
+  cursorY += 3;
 
-  // Nutrient Grid (4 columns)
-  // Python used: Total Fat, Sat Fat, Trans Fat, Cholesterol in Row 1
-  const colW = contentWidth / 4; // 11.5mm
+  // Nutrient grid — 4 columns, 3 rows
+  const colW = contentWidth / 4;
   const rowSpacing = 6;
-
-  // Calculate column centers: col1_x = 2 + (46/4) * 0.5, col2_x = 2 + (46/4) * 1.5, etc.
   const col1X = startX + colW * 0.5;
   const col2X = startX + colW * 1.5;
   const col3X = startX + colW * 2.5;
@@ -692,58 +676,51 @@ export const generateTripleLabel = async (product: MasterProduct, nutrition: Nut
 
   const drawNutrient = (label: string, val: string | number | undefined, unit: string, colX: number, rowY: number) => {
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(4.5); // Header size
+    doc.setFontSize(4.5);
     doc.text(label, colX, rowY, { align: 'center' });
-
-    doc.setFontSize(6); // Value size
-    const valueStr = formatNutrient(val, unit);
-    doc.text(valueStr, colX, rowY + 2.5, { align: 'center' });
+    doc.setFontSize(6);
+    doc.text(formatNutrient(val, unit), colX, rowY + 2.5, { align: 'center' });
   };
 
-  // Row 1
   const row1Y = cursorY;
-  drawNutrient("Total Fat", nutrition["Total Fat"], "g", col1X, row1Y);
-  drawNutrient("Saturated Fat", nutrition["Saturated Fat"], "g", col2X, row1Y);
-  drawNutrient("Trans Fat", nutrition["Trans Fat"], "g", col3X, row1Y);
-  drawNutrient("Cholesterol", nutrition.Cholesterol, "mg", col4X, row1Y);
+  drawNutrient("Total Fat",      nutrition["Total Fat"],           "g",  col1X, row1Y);
+  drawNutrient("Saturated Fat",  nutrition["Saturated Fat"],       "g",  col2X, row1Y);
+  drawNutrient("Trans Fat",      nutrition["Trans Fat"],           "g",  col3X, row1Y);
+  drawNutrient("Cholesterol",    nutrition.Cholesterol,            "mg", col4X, row1Y);
 
-  // Row 2
   const row2Y = row1Y + rowSpacing;
-  drawNutrient("Total Carbs", nutrition["Total Carbohydrate"], "g", col1X, row2Y);
-  drawNutrient("Dietary Fibers", nutrition["Dietary Fiber"], "g", col2X, row2Y);
-  drawNutrient("Total Sugars", nutrition["Total Sugars"], "g", col3X, row2Y);
-  drawNutrient("Added Sugars", nutrition["Added Sugars"], "g", col4X, row2Y);
+  drawNutrient("Total Carbs",    nutrition["Total Carbohydrate"],  "g",  col1X, row2Y);
+  drawNutrient("Dietary Fibers", nutrition["Dietary Fiber"],       "g",  col2X, row2Y);
+  drawNutrient("Total Sugars",   nutrition["Total Sugars"],        "g",  col3X, row2Y);
+  drawNutrient("Added Sugars",   nutrition["Added Sugars"],        "g",  col4X, row2Y);
 
-  // Row 3 (Sodium, Protein) - only in columns 1 and 2
   const row3Y = row2Y + rowSpacing;
-  drawNutrient("Sodium", nutrition["Sodium(mg)"], "mg", col1X, row3Y);
-  drawNutrient("Protein", nutrition.Protein, "g", col2X, row3Y);
+  drawNutrient("Sodium",         nutrition["Sodium(mg)"],          "mg", col1X, row3Y);
+  drawNutrient("Protein",        nutrition.Protein,                "g",  col2X, row3Y);
 
-  cursorY = row3Y + rowSpacing + 1; // Extra space before disclaimer
+  cursorY = row3Y + rowSpacing;
 
-  // Disclaimer - left-aligned from startX, matching Python positioning
+  // Disclaimer
   doc.setFont("helvetica", "normal");
   doc.setFontSize(4);
   const disclaimer = "* The % Daily Value (DV) tells you how much a nutrient in a serving of food contributes to a daily diet.";
   const splitDisc = doc.splitTextToSize(disclaimer, contentWidth);
-  // Left-align from startX instead of centering
-  for (let i = 0; i < splitDisc.length; i++) {
-    doc.text(splitDisc[i], TRIPLE_WIDTH / 2, cursorY, { align: 'center' });
-    cursorY += 1.5; // Line spacing
+  for (const line of splitDisc) {
+    doc.text(line, TRIPLE_WIDTH / 2, cursorY, { align: 'center' });
+    cursorY += 1.5;
   }
-  cursorY += 0.5;
 
-  // Separator
-  doc.setLineWidth(0.2);
-  doc.line(2, cursorY, 48, cursorY);
-  cursorY += 4; // Add more space after separator line before MRP section
+  // Separator line 2 — FIXED at y=61mm (matches house_label.pdf)
+  doc.setLineWidth(0.3);
+  doc.line(5, SEC2_LINE, 45, SEC2_LINE);
 
-  // --- 3. Bottom Section (MRP etc) ---
+  // ─── SECTION 3: MRP details + Barcode (62mm–100mm) ───────────────────────────
 
-  // All fields bold, left aligned
+  cursorY = SEC3_START + 2;
+
   doc.setFont("helvetica", "bold");
   doc.setFontSize(5.5);
-  const lineHeight = 2.7;
+  const lineHeight = 3;
 
   const mrpRaw = product['M.R.P'] || product.MRP;
   const mrp = mrpRaw ? `INR ${Math.round(parseFloat(mrpRaw))}` : 'INR N/A';
@@ -758,7 +735,7 @@ export const generateTripleLabel = async (product: MasterProduct, nutrition: Nut
 
   const nameLines = doc.splitTextToSize(`Name: ${productName}`, contentWidth);
   doc.text(nameLines, startX, cursorY);
-  cursorY += (nameLines.length * lineHeight);
+  cursorY += nameLines.length * lineHeight;
 
   doc.text(`Net Weight: ${product['Net Weight'] || 'N/A'} Kg`, startX, cursorY);
   cursorY += lineHeight;
@@ -766,7 +743,6 @@ export const generateTripleLabel = async (product: MasterProduct, nutrition: Nut
   doc.text(`M.R.P: ${mrp}`, startX, cursorY);
   cursorY += lineHeight;
 
-  // Combine M.F.G and USE BY on same line with vertical separator
   doc.text(`M.F.G: ${mfgDate} | USE BY: ${useByStr}`, startX, cursorY);
   cursorY += lineHeight;
 
@@ -778,37 +754,20 @@ export const generateTripleLabel = async (product: MasterProduct, nutrition: Nut
     cursorY += lineHeight;
   }
 
-  // Barcode
-  // Position barcode closer to MRP section with minimal gap
+  // Barcode — 44mm wide × 13mm high, centred, at y=83mm or just after text
   const fnsku = product.FNSKU;
   if (fnsku) {
-    // Calculate space needed for barcode
+    const barcodeW = 42;
     const barcodeH = 10;
-    const barcodeTextH = 2.5; // Space for FNSKU text below barcode (slightly more for larger font)
-    const barcodeTotalH = barcodeH + barcodeTextH;
+    const barcodeX = 4; // original position
+    const barcodeY = Math.max(cursorY + 1, 83);      // min y=83mm to match PDF position
 
-    // Position barcode with minimal gap after MRP section (1mm gap for proper spacing)
-    const barcodeY = cursorY + 1;
+    const imgData = createBarcodeDataUrl(fnsku, false);
+    doc.addImage(imgData, 'PNG', barcodeX, barcodeY, barcodeW, barcodeH);
 
-    // Only add barcode if it fits within label height
-    if (barcodeY + barcodeTotalH <= TRIPLE_HEIGHT - 1) {
-      // Create barcode WITHOUT text (we'll add it manually for better control)
-      const imgData = createBarcodeDataUrl(fnsku, false);
-      doc.addImage(imgData, 'PNG', 4, barcodeY, 42, barcodeH);
-
-      // Add FNSKU text below barcode manually with larger font size and proper spacing
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(7); // Increased from 5 to 6
-      doc.text(fnsku, TRIPLE_WIDTH / 2, barcodeY + barcodeH + 2.5, { align: 'center' }); // Increased spacing from 1.5 to 2.5mm
-    } else {
-      // If not enough space, position at bottom as fallback
-      const fallbackY = TRIPLE_HEIGHT - barcodeTotalH - 1;
-      const imgData = createBarcodeDataUrl(fnsku, false);
-      doc.addImage(imgData, 'PNG', 4, fallbackY, 42, barcodeH);
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(6); // Increased from 5 to 6
-      doc.text(fnsku, TRIPLE_WIDTH / 2, fallbackY + barcodeH + 2.5, { align: 'center' }); // Increased spacing from 1.5 to 2.5mm
-    }
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7);
+    doc.text(fnsku, TRIPLE_WIDTH / 2, barcodeY + barcodeH + 2.5, { align: 'center' });
   }
 
   return doc;
