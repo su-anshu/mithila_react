@@ -735,11 +735,11 @@ export const processPdfInvoices = async (
         let pageRejectedCount = 0;
         let pageAsinsFound = 0;
 
-        // Per-page deduplication: pdf.js Y-coordinate grouping can place the same ASIN
-        // on multiple reconstructed lines when invoice structures vary (different header
-        // sizes, table heights). PyMuPDF (Streamlit) reads each ASIN once per page.
-        // We replicate that by accepting each ASIN at most once per PDF page.
-        const seenAsinsOnPage = new Set<string>();
+        // Per-page deduplication: MuPDF WASM can occasionally extract the same ASIN from
+        // nearby Y-coordinate groups (1–3 lines apart) as a rendering artifact.
+        // We skip those, but allow the same ASIN ≥5 lines later — that is a legitimate
+        // separate line item (e.g. Amazon creates two qty=1 rows instead of one qty=2 row).
+        const seenAsinsOnPage = new Map<string, number>(); // ASIN → last accepted lineIndex
 
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i];
@@ -754,10 +754,16 @@ export const processPdfInvoices = async (
             asinExtractionAttempts++;
             globalAsinAttempts++;
 
-            // Skip if this ASIN was already accepted on this page (pdf.js duplicate extraction)
+            // Skip if this ASIN was seen very recently on this page (rendering artifact).
+            // Allow it through if ≥5 lines away — that is a separate invoice line item.
             if (seenAsinsOnPage.has(asin)) {
-              console.debug(`[PDF Processing] Skipping duplicate ASIN on same page: ${asin}, Page ${pageIndex + 1}, Line ${i}`);
-              continue;
+              const lastSeenLine = seenAsinsOnPage.get(asin)!;
+              if (i - lastSeenLine < 5) {
+                console.debug(`[PDF Processing] Skipping duplicate ASIN within 5 lines (artifact): ${asin}, Page ${pageIndex + 1}, Line ${i}`);
+                continue;
+              }
+              // ≥5 lines apart — treat as separate line item, allow through
+              console.debug(`[PDF Processing] Same ASIN ≥5 lines later — treating as separate line item: ${asin}, Page ${pageIndex + 1}, Line ${i} (prev at ${lastSeenLine})`);
             }
 
             const validationResult = validateASINContext(
@@ -774,7 +780,7 @@ export const processPdfInvoices = async (
             // Match Streamlit: Add ASIN immediately if valid OR if ambiguous (not in address)
             if (validationResult.valid) {
               // Valid ASIN (in invoice table or has product context) - add immediately
-              seenAsinsOnPage.add(asin);
+              seenAsinsOnPage.set(asin, i);
               const qty = extractQuantity(
                 line, lines, i,
                 asin, file.name, pageIndex + 1, quantityDefaults
@@ -797,7 +803,7 @@ export const processPdfInvoices = async (
               console.log(`[PDF Processing]   Line content: "${linePreview}"`);
             } else if (!validationResult.isInAddress) {
               // Ambiguous ASIN (not in address, but no clear context) - accept as fallback
-              seenAsinsOnPage.add(asin);
+              seenAsinsOnPage.set(asin, i);
               const qty = extractQuantity(
                 line, lines, i,
                 asin, file.name, pageIndex + 1, quantityDefaults
