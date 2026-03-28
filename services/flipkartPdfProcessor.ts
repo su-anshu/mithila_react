@@ -29,7 +29,7 @@ export interface FlipkartPDFProcessingResult {
  * Smart text joining that preserves spacing and table structure
  * Uses text item positions to determine when to add spaces vs newlines
  * Falls back to simple join if position data is unreliable
- * 
+ *
  * @param items Text content items from PDF.js
  * @returns Joined text string with proper spacing
  */
@@ -45,7 +45,7 @@ const smartJoinTextItems = (items: any[]): string => {
     let lastY = -1;
     const Y_THRESHOLD = 3; // Consider items on same line if Y difference < 3
 
-    // Group items by Y position (line)
+    // Group items by Y position (line), processing in PDF.js order
     for (const item of items) {
       const text = item.str || '';
       if (!text.trim()) continue;
@@ -87,12 +87,23 @@ const smartJoinTextItems = (items: any[]): string => {
 
 /**
  * Extract SKU IDs from Flipkart invoice page text
- * 
- * Looks for table format: "SKU ID | Description | QTY"
- * SKU ID format: "1 Product Name Weight"
- * 
- * Enhanced version matching Streamlit implementation with better pattern matching
- * 
+ *
+ * Strategy 1 (primary, order-independent):
+ *   Scans ALL lines for the Flipkart shipping-label SKU row format:
+ *     "{row_num} {SKU_name} | MITHILA {description} | ... {qty}"
+ *   The "MITHILA" anchor prevents accidental matches in the tax invoice section.
+ *
+ * Strategy 2 (fallback):
+ *   Finds the "SKU ID | Description QTY" table header, then takes the FIRST
+ *   line after it that starts with \d+\s+[A-Za-z] as the SKU row.
+ *   Stops looking after 15 lines or on a stop-word hit.
+ *   Uses TOTAL QTY from the page as a qty fallback.
+ *
+ * Pattern 3 (the old "flexible" match with no ^ anchor) is intentionally removed
+ * because it matched partial patterns inside tax invoice description text,
+ * producing garbage SKUs like "2 kg" or "3 Natural" that accumulated into phantom
+ * products (e.g. "Sattu 3kg qty=251") in the packing plan.
+ *
  * @param pageText Full text content of the PDF page
  * @returns Array of { skuId, description, qty }
  */
@@ -105,189 +116,105 @@ export const extractSkuFromPage = (pageText: string): Array<{ skuId: string; des
   const products: Array<{ skuId: string; description: string; qty: number }> = [];
   const lines = pageText.split('\n');
 
-  // Debug: Log first 500 chars of page text
-  const textPreview = pageText.substring(0, 500);
-  console.debug(`[Flipkart SKU] Page text preview (first 500 chars): ${textPreview}...`);
+  console.debug(`[Flipkart SKU] Page text preview (first 500 chars): ${pageText.substring(0, 500)}...`);
 
-  // Find table header
+  // ── Strategy 1: Mithila-specific pattern (order-independent) ──────────────
+  // Matches only the shipping-label SKU table row because:
+  //   • Starts with \d+ (row number) — tax invoice product rows start with letters
+  //   • Has "MITHILA" right after the first pipe — tax invoice lines never do
+  //   • Ends with a digit (the QTY column)
+  // This pattern is safe to run over ALL lines regardless of ordering.
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    // Full row: "1 Jau Sattu 500g | MITHILA FOODS ... | High-Fiber 1"
+    // Group 1 = "1 Jau Sattu 500g"  (skuId with row number)
+    // Group 2 = "MITHILA FOODS ..."  (description)
+    // Group 3 = "1"                  (qty — last number on the line)
+    const m = line.match(/^(\d+\s+[A-Za-z][^|]*)\|\s*(MITHILA[^|]*)\|.*?(\d+)\s*$/i);
+    if (m) {
+      const skuId = m[1].trim();
+      const description = m[2].trim();
+      const qty = parseInt(m[3], 10);
+      console.debug(`[Flipkart SKU] Strategy 1 match: SKU=${skuId}, Qty=${qty}`);
+      products.push({ skuId, description, qty });
+    }
+  }
+
+  if (products.length > 0) {
+    console.debug(`[Flipkart SKU] Strategy 1 found ${products.length} product(s)`);
+    return products;
+  }
+
+  // ── Strategy 2: Header-based fallback ────────────────────────────────────
+  // Used when Strategy 1 finds nothing (e.g. description doesn't contain "MITHILA",
+  // or the SKU row spans multiple lines).
+
+  // Get TOTAL QTY from the page as a reliable qty fallback
+  const totalQtyFromPage = (() => {
+    const m = pageText.match(/TOTAL\s+QTY[:\s]*(\d+)/i);
+    return m ? parseInt(m[1], 10) : 1;
+  })();
+
+  // Find "SKU ID | Description QTY" table header
   let tableStartIdx: number | null = null;
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const lineUpper = line.toUpperCase();
-    if ((lineUpper.includes('SKU ID') || lineUpper.includes('SKU')) && 
-        (lineUpper.includes('DESCRIPTION') || lineUpper.includes('QTY') || lineUpper.includes('QUANTITY'))) {
+    const lineUpper = lines[i].toUpperCase();
+    if (lineUpper.includes('SKU ID') &&
+        (lineUpper.includes('DESCRIPTION') || lineUpper.includes('QTY'))) {
       tableStartIdx = i;
-      console.debug(`[Flipkart SKU] Found table header at line ${i}: ${line.substring(0, 100)}`);
+      console.debug(`[Flipkart SKU] Strategy 2 header at line ${i}: ${lines[i].substring(0, 80)}`);
       break;
     }
   }
 
   if (tableStartIdx === null) {
-    console.debug('[Flipkart SKU] No table header found, trying alternative extraction');
-    // Try alternative: look for product descriptions directly
-    // Pattern: "1 Product Name Weight | Description | QTY"
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
-
-      // Pattern 1: Full table row with pipe separators
-      // "1 Product Name Weight | Description | QTY"
-      const skuMatch = line.match(/^(\d+\s+[A-Za-z].*?)\s*\|\s*(.*?)\s*\|\s*(\d+)/);
-      if (skuMatch) {
-        const skuId = skuMatch[1].trim();
-        const description = skuMatch[2].trim();
-        const qty = parseInt(skuMatch[3], 10);
-        console.debug(`[Flipkart SKU] Alternative extraction - Pattern 1: SKU=${skuId}, Qty=${qty}`);
-        products.push({ skuId, description, qty });
-        continue;
-      }
-
-      // Pattern 2: SKU ID with weight pattern, quantity might be separate
-      // "1 Product Name Weight" followed by quantity
-      const skuWithWeightMatch = line.match(/^(\d+\s+[A-Za-z].*?\s+\d+(?:\.\d+)?(?:kg|g))/i);
-      if (skuWithWeightMatch) {
-        const skuId = skuWithWeightMatch[1].trim();
-        // Look for quantity in same line or next few lines
-        let qty = 1;
-        let description = '';
-
-        // Check same line for quantity
-        const qtyInLine = line.match(/\bQTY\s*:?\s*(\d+)\b/i) || line.match(/\|\s*(\d+)\s*$/);
-        if (qtyInLine) {
-          qty = parseInt(qtyInLine[1], 10);
-        }
-
-        // Check for description in same line (after pipe)
-        if (line.includes('|')) {
-          const parts = line.split('|');
-          if (parts.length > 1) {
-            description = parts.slice(1).join('|').trim();
-          }
-        }
-
-        // Look ahead for quantity if not found
-        if (qty === 1) {
-          for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
-            const qtyMatch = lines[j].match(/\bQTY\s*:?\s*(\d+)\b/i);
-            if (qtyMatch) {
-              qty = parseInt(qtyMatch[1], 10);
-              break;
-            }
-            const numMatch = lines[j].match(/^\s*(\d+)\s*$/);
-            if (numMatch) {
-              qty = parseInt(numMatch[1], 10);
-              break;
-            }
-          }
-        }
-
-        console.debug(`[Flipkart SKU] Alternative extraction - Pattern 2: SKU=${skuId}, Qty=${qty}`);
-        products.push({ skuId, description, qty });
-      }
-    }
-    
-    if (products.length > 0) {
-      console.debug(`[Flipkart SKU] Alternative extraction found ${products.length} products`);
-    }
+    console.debug('[Flipkart SKU] No table header found');
     return products;
   }
 
-  // Parse table rows after header
-  let productsFound = 0;
-  for (let i = tableStartIdx + 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) {
-      continue;
-    }
+  const stopWords = ['SOLD BY', 'AWB', 'HBD', 'CPD', 'TAX INVOICE', 'TOTAL QTY', 'SHIPPING'];
 
-    // Stop if we hit a section that's not part of the table
+  // Look at up to 15 lines after the header; take the FIRST SKU row found
+  for (let i = tableStartIdx + 1; i < Math.min(tableStartIdx + 16, lines.length); i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
     const lineUpper = line.toUpperCase();
-    const stopWords = ['SOLD BY', 'SHIPPING', 'AWB', 'ORDERED', 'HBD', 'CPD', 'TAX INVOICE'];
-    if (stopWords.some(stopWord => lineUpper.includes(stopWord))) {
-      console.debug(`[Flipkart SKU] Stopping at line ${i} (stop word detected): ${line.substring(0, 50)}`);
+
+    // Stop on obvious section boundaries
+    if (stopWords.some(sw => lineUpper.includes(sw))) {
+      console.debug(`[Flipkart SKU] Strategy 2 stop word at line ${i}: ${line.substring(0, 50)}`);
       break;
     }
 
-    // Skip header rows
-    if (lineUpper.includes('SKU ID') || lineUpper.includes('DESCRIPTION') || 
-        (lineUpper.includes('QTY') && lineUpper.length < 20)) {
-      continue;
+    // Skip repeated header rows
+    if (lineUpper.includes('SKU ID') || lineUpper.includes('DESCRIPTION')) continue;
+
+    // Must start with digit(s) + space + letter
+    if (!/^\d+\s+[A-Za-z]/.test(line)) continue;
+
+    // Extract skuId (everything before the first pipe, or the whole line)
+    const skuId = line.includes('|') ? line.split('|')[0].trim() : line.trim();
+
+    // Extract qty: try last number on the line first, then TOTAL QTY
+    let qty = totalQtyFromPage;
+    const endNumMatch = line.match(/(\d+)\s*$/);
+    if (endNumMatch) {
+      const candidate = parseInt(endNumMatch[1], 10);
+      // Sanity-check: real qty should be ≤ 99; large numbers are prices/weights
+      if (candidate <= 99) qty = candidate;
     }
 
-    // Pattern 1: "1 Product Name Weight | Description | QTY" (full table row)
-    const tableRowMatch = line.match(/^(\d+\s+[A-Za-z].*?)\s*\|\s*(.*?)\s*\|\s*(\d+)/);
-    if (tableRowMatch) {
-      const skuId = tableRowMatch[1].trim();
-      const description = tableRowMatch[2].trim();
-      const qty = parseInt(tableRowMatch[3], 10);
-      console.debug(`[Flipkart SKU] Pattern 1 match: SKU=${skuId}, Qty=${qty}`);
-      products.push({ skuId, description, qty });
-      productsFound++;
-      continue;
-    }
+    const description = line.includes('|') ? (line.split('|')[1] || '').trim() : '';
 
-    // Pattern 2: "1 Product Name Weight" (SKU ID only, quantity might be on next line)
-    const skuOnlyMatch = line.match(/^(\d+\s+[A-Za-z].*?)$/);
-    if (skuOnlyMatch) {
-      const skuId = skuOnlyMatch[1].trim();
-      
-      // Look ahead for quantity
-      let qty = 1;
-      for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
-        const qtyMatch = lines[j].match(/\bQTY\s*:?\s*(\d+)\b/i);
-        if (qtyMatch) {
-          qty = parseInt(qtyMatch[1], 10);
-          break;
-        }
-        // Also check for standalone number
-        const numMatch = lines[j].match(/^\s*(\d+)\s*$/);
-        if (numMatch) {
-          qty = parseInt(numMatch[1], 10);
-          break;
-        }
-      }
-
-      // Try to extract description from same line or next line
-      let description = '';
-      if (line.includes('|')) {
-        const parts = line.split('|');
-        if (parts.length > 1) {
-          description = parts[1].trim();
-        }
-      } else {
-        // Check next line for description
-        if (i + 1 < lines.length) {
-          const nextLine = lines[i + 1].trim();
-          if (nextLine.toUpperCase().includes('MITHILA') || nextLine.toUpperCase().includes('FOODS')) {
-            description = nextLine;
-          }
-        }
-      }
-
-      console.debug(`[Flipkart SKU] Pattern 2 match: SKU=${skuId}, Qty=${qty}`);
-      products.push({ skuId, description, qty });
-      productsFound++;
-      continue;
-    }
-
-    // Pattern 3: Try matching without strict line start (for multi-line SKUs)
-    // Look for pattern anywhere in line: number + letter + product name
-    const flexibleMatch = line.match(/(\d+\s+[A-Za-z][^\|]*?)(?:\s*\|\s*(.*?))?(?:\s*\|\s*(\d+))?/);
-    if (flexibleMatch) {
-      const skuId = flexibleMatch[1].trim();
-      const description = flexibleMatch[2] ? flexibleMatch[2].trim() : '';
-      const qty = flexibleMatch[3] ? parseInt(flexibleMatch[3], 10) : 1;
-      
-      // Only add if it looks like a valid SKU (has product name, not just numbers)
-      if (skuId.match(/[A-Za-z]{2,}/)) {
-        console.debug(`[Flipkart SKU] Pattern 3 match: SKU=${skuId}, Qty=${qty}`);
-        products.push({ skuId, description, qty });
-        productsFound++;
-      }
-    }
+    console.debug(`[Flipkart SKU] Strategy 2 match: SKU=${skuId}, Qty=${qty}`);
+    products.push({ skuId, description, qty });
+    break; // each Flipkart invoice has exactly one product in the SKU table
   }
 
-  console.debug(`[Flipkart SKU] Extracted ${productsFound} products from table (starting at line ${tableStartIdx})`);
+  console.debug(`[Flipkart SKU] Strategy 2 found ${products.length} product(s)`);
   return products;
 };
 
