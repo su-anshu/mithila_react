@@ -118,28 +118,53 @@ export const extractSkuFromPage = (pageText: string): Array<{ skuId: string; des
 
   console.debug(`[Flipkart SKU] Page text preview (first 500 chars): ${pageText.substring(0, 500)}...`);
 
+  // Get TOTAL QTY from the tax invoice section — this is always reliable as a
+  // cross-check because it's a clearly formatted line: "TOTAL QTY: 1"
+  const totalQtyFromPage = (() => {
+    const m = pageText.match(/TOTAL\s+QTY[:\s]*(\d+)/i);
+    return m ? parseInt(m[1], 10) : null;
+  })();
+
   // ── Strategy 1: Mithila-specific pattern (order-independent) ──────────────
   // Matches only the shipping-label SKU table row because:
-  //   • Starts with \d+ (row number) — tax invoice product rows start with letters
+  //   • Starts with \d+ (row number) — tax invoice rows start with letters
   //   • Has "MITHILA" right after the first pipe — tax invoice lines never do
   //   • Ends with a digit (the QTY column)
-  // This pattern is safe to run over ALL lines regardless of ordering.
+  // Works for BOTH formats Flipkart uses:
+  //   Two-pipe: "1 Jau Sattu 500g | MITHILA FOODS 500g Jau Sattu | High-Fiber 1"
+  //   One-pipe: "1 wssl 250g p1 | MITHILA FOODS White Sesame Jaggery Laddoo 250 1"
+  // Safe to scan ALL lines regardless of content stream ordering.
   for (const rawLine of lines) {
     const line = rawLine.trim();
     if (!line) continue;
 
-    // Full row: "1 Jau Sattu 500g | MITHILA FOODS ... | High-Fiber 1"
-    // Group 1 = "1 Jau Sattu 500g"  (skuId with row number)
-    // Group 2 = "MITHILA FOODS ..."  (description)
-    // Group 3 = "1"                  (qty — last number on the line)
-    const m = line.match(/^(\d+\s+[A-Za-z][^|]*)\|\s*(MITHILA[^|]*)\|.*?(\d+)\s*$/i);
-    if (m) {
-      const skuId = m[1].trim();
-      const description = m[2].trim();
-      const qty = parseInt(m[3], 10);
-      console.debug(`[Flipkart SKU] Strategy 1 match: SKU=${skuId}, Qty=${qty}`);
-      products.push({ skuId, description, qty });
+    // Group 1 = "1 Jau Sattu 500g"       (skuId including row number)
+    // Group 2 = "MITHILA FOODS ..."       (description — may span to end)
+    // Group 3 = "1"                       (qty — last number on the line)
+    // The lazy .*? in group 2 ensures group 3 captures the LAST number, not an
+    // intermediate one like a weight (e.g. "250" in "Laddoo 250 1" → qty=1).
+    const m = line.match(/^(\d+\s+[A-Za-z][^|]*)\|\s*(MITHILA.*?)(\d+)\s*$/i);
+    if (!m) continue;
+
+    const skuId = m[1].trim();
+    const description = m[2].trim();
+    const rawQty = parseInt(m[3], 10);
+
+    // Cross-validate extracted qty against TOTAL QTY from the tax invoice.
+    // TOTAL QTY is the definitive source; if they disagree, trust TOTAL QTY.
+    // Also reject obviously wrong values (< 1 or > 999).
+    let qty = rawQty;
+    if (rawQty < 1 || rawQty > 999) {
+      qty = totalQtyFromPage ?? 1;
+      console.warn(`[Flipkart SKU] Strategy 1 qty ${rawQty} out of range for SKU=${skuId}, using TOTAL QTY=${qty}`);
+    } else if (totalQtyFromPage !== null && rawQty !== totalQtyFromPage) {
+      // For single-product invoices the numbers must match; trust TOTAL QTY
+      console.warn(`[Flipkart SKU] Strategy 1 qty mismatch: line=${rawQty}, TOTAL QTY=${totalQtyFromPage} for SKU=${skuId}. Using TOTAL QTY.`);
+      qty = totalQtyFromPage;
     }
+
+    console.debug(`[Flipkart SKU] Strategy 1 match: SKU=${skuId}, Qty=${qty}`);
+    products.push({ skuId, description, qty });
   }
 
   if (products.length > 0) {
@@ -150,12 +175,7 @@ export const extractSkuFromPage = (pageText: string): Array<{ skuId: string; des
   // ── Strategy 2: Header-based fallback ────────────────────────────────────
   // Used when Strategy 1 finds nothing (e.g. description doesn't contain "MITHILA",
   // or the SKU row spans multiple lines).
-
-  // Get TOTAL QTY from the page as a reliable qty fallback
-  const totalQtyFromPage = (() => {
-    const m = pageText.match(/TOTAL\s+QTY[:\s]*(\d+)/i);
-    return m ? parseInt(m[1], 10) : 1;
-  })();
+  // totalQtyFromPage already computed above; reuse it here as fallback qty.
 
   // Find "SKU ID | Description QTY" table header
   let tableStartIdx: number | null = null;
@@ -199,7 +219,7 @@ export const extractSkuFromPage = (pageText: string): Array<{ skuId: string; des
     const skuId = line.includes('|') ? line.split('|')[0].trim() : line.trim();
 
     // Extract qty: try last number on the line first, then TOTAL QTY
-    let qty = totalQtyFromPage;
+    let qty = totalQtyFromPage ?? 1;
     const endNumMatch = line.match(/(\d+)\s*$/);
     if (endNumMatch) {
       const candidate = parseInt(endNumMatch[1], 10);
@@ -243,73 +263,62 @@ export const extractProductInfoFlipkart = async (pdfBytes: Uint8Array): Promise<
 
     console.log(`[Flipkart PDF] Processing PDF with ${pdf.numPages} page(s)`);
 
-    // Extract full text from all pages using smart joining
-    let fullText = '';
+    // Single pass: read each page once for both order-info extraction and product extraction.
+    // Per-page errors are isolated — one corrupt page will not abort the entire PDF.
+    let firstOrderId: string | null = null;
+    let firstAwbNumber: string | null = null;
+
     for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-      const page = await pdf.getPage(pageNum);
-      const textContent = await page.getTextContent();
-      const pageText = smartJoinTextItems(textContent.items);
-      fullText += pageText + '\n';
-    }
+      try {
+        const page = await pdf.getPage(pageNum);
+        const textContent = await page.getTextContent();
+        const pageText = smartJoinTextItems(textContent.items);
 
-    // Extract order ID (pattern: "OD\d+")
-    const orderIdMatch = fullText.match(/OD\d+/);
-    if (orderIdMatch) {
-      result.orderId = orderIdMatch[0];
-      console.log(`[Flipkart PDF] Found Order ID: ${result.orderId}`);
-    }
+        console.debug(`[Flipkart PDF] Page ${pageNum} preview: ${pageText.substring(0, 300)}...`);
 
-    // Extract AWB number (pattern: "AWB No. (FMP[CP]\d+)")
-    const awbMatch = fullText.match(/AWB\s+No\.\s*(FMP[CP]\d+)/i);
-    if (awbMatch) {
-      result.awbNumber = awbMatch[1];
-      console.log(`[Flipkart PDF] Found AWB Number: ${result.awbNumber}`);
-    }
-
-    // Extract products from each page
-    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-      const page = await pdf.getPage(pageNum);
-      const textContent = await page.getTextContent();
-      const pageText = smartJoinTextItems(textContent.items);
-      
-      // Debug: Log page text preview
-      const pageTextPreview = pageText.substring(0, 500);
-      console.debug(`[Flipkart PDF] Page ${pageNum} text preview (first 500 chars): ${pageTextPreview}...`);
-      
-      const skuProducts = extractSkuFromPage(pageText);
-      console.log(`[Flipkart PDF] Page ${pageNum}: Found ${skuProducts.length} SKU product(s)`);
-
-      for (const { skuId, description, qty } of skuProducts) {
-        // Clean SKU ID - remove description part if pipe exists
-        let cleanSkuId = skuId;
-        if (cleanSkuId.includes('|')) {
-          cleanSkuId = cleanSkuId.split('|')[0].trim();
+        // Capture order ID and AWB from the first matching page
+        if (!firstOrderId) {
+          const m = pageText.match(/OD\d+/);
+          if (m) firstOrderId = m[0];
+        }
+        if (!firstAwbNumber) {
+          const m = pageText.match(/(?:AWB\s+No\.\s*)?(FMP[CP]\d+)/i);
+          if (m) firstAwbNumber = m[1];
         }
 
-        const { productName, weight } = parseSkuId(cleanSkuId);
+        const skuProducts = extractSkuFromPage(pageText);
+        console.log(`[Flipkart PDF] Page ${pageNum}: Found ${skuProducts.length} SKU product(s)`);
 
-        // Convert null to empty string for consistent handling
-        const finalProductName = productName || '';
-        const finalWeight = weight || '';
+        for (const { skuId, description, qty } of skuProducts) {
+          // Remove any pipe-leaked description from skuId
+          let cleanSkuId = skuId.includes('|') ? skuId.split('|')[0].trim() : skuId;
 
-        const productInfo: FlipkartProductInfo = {
-          skuId: cleanSkuId,
-          productName: finalProductName,
-          weight: finalWeight,
-          description,
-          qty,
-          page: pageNum
-        };
+          const { productName, weight } = parseSkuId(cleanSkuId);
 
-        result.products.push(productInfo);
+          const productInfo: FlipkartProductInfo = {
+            skuId: cleanSkuId,
+            productName: productName || '',
+            weight: weight || '',
+            description,
+            qty,
+            page: pageNum
+          };
 
-        console.log(`[Flipkart PDF] Extracted: SKU=${cleanSkuId}, Product=${finalProductName}, Weight=${finalWeight}, Qty=${qty}`);
+          result.products.push(productInfo);
+          console.log(`[Flipkart PDF] Extracted: SKU=${cleanSkuId}, Product=${productName}, Weight=${weight}, Qty=${qty}`);
+        }
+      } catch (pageError) {
+        // Skip this page and continue — don't let one bad page fail the whole file
+        console.warn(`[Flipkart PDF] Page ${pageNum} failed, skipping:`, pageError);
       }
     }
 
-    console.log(`[Flipkart PDF] Total products extracted: ${result.products.length}`);
+    result.orderId = firstOrderId;
+    result.awbNumber = firstAwbNumber;
+
+    console.log(`[Flipkart PDF] Done. Products: ${result.products.length}, OrderID: ${result.orderId}, AWB: ${result.awbNumber}`);
   } catch (error) {
-    console.error('[Flipkart PDF] Error extracting product info:', error);
+    console.error('[Flipkart PDF] Fatal error loading PDF:', error);
     throw error;
   }
 

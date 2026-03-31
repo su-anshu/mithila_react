@@ -304,7 +304,8 @@ const extractQuantity = (
   asin?: string,
   fileName?: string,
   pageNumber?: number,
-  diagnosticsArray?: import('../types').QuantityDefault[]
+  diagnosticsArray?: import('../types').QuantityDefault[],
+  isRepeatOccurrence?: boolean  // true when same ASIN seen ≥5 lines later on same page
 ): number => {
   let qty = 1;
   let qtyFoundByPattern = false;
@@ -395,7 +396,12 @@ const extractQuantity = (
   // ONLY run backward search if forward search found NO pattern match (defaulted to 1).
   // If forward search found qty=1 via a pattern, that IS the correct quantity — do NOT
   // run backward search or it will cross-contaminate with the previous product's qty row.
-  if (!qtyFoundByPattern) {
+  //
+  // IMPORTANT: Skip backward search entirely for repeat ASIN occurrences (same ASIN
+  // appearing a 2nd+ time on the page for a multi-row invoice like qty=8 + qty=2).
+  // Backward search would walk back past the current row and find the PREVIOUS row's
+  // qty (e.g. 8 instead of 2), causing double-counting (8+8+1=17 instead of 8+2+1=11).
+  if (!qtyFoundByPattern && !isRepeatOccurrence) {
     const backSearchStart = Math.max(0, startIndex - 12);
     for (let j = startIndex - 1; j >= backSearchStart; j--) {
       const qtyLine = lines[j];
@@ -756,14 +762,19 @@ export const processPdfInvoices = async (
 
             // Skip if this ASIN was seen very recently on this page (rendering artifact).
             // Allow it through if ≥5 lines away — that is a separate invoice line item.
+            // Track whether this is a repeat occurrence (same ASIN ≥5 lines later).
+            // Used to disable backward search in extractQuantity so it doesn't
+            // accidentally pick up the previous row's qty (e.g. 8 instead of 2).
+            let isRepeatAsin = false;
             if (seenAsinsOnPage.has(asin)) {
               const lastSeenLine = seenAsinsOnPage.get(asin)!;
               if (i - lastSeenLine < 5) {
                 console.debug(`[PDF Processing] Skipping duplicate ASIN within 5 lines (artifact): ${asin}, Page ${pageIndex + 1}, Line ${i}`);
                 continue;
               }
-              // ≥5 lines apart — treat as separate line item, allow through
-              console.debug(`[PDF Processing] Same ASIN ≥5 lines later — treating as separate line item: ${asin}, Page ${pageIndex + 1}, Line ${i} (prev at ${lastSeenLine})`);
+              // ≥5 lines apart — treat as a separate invoice line item, allow through
+              isRepeatAsin = true;
+              console.debug(`[PDF Processing] Same ASIN ≥5 lines later — treating as separate line item (repeat, no backward search): ${asin}, Page ${pageIndex + 1}, Line ${i} (prev at ${lastSeenLine})`);
             }
 
             const validationResult = validateASINContext(
@@ -783,7 +794,7 @@ export const processPdfInvoices = async (
               seenAsinsOnPage.set(asin, i);
               const qty = extractQuantity(
                 line, lines, i,
-                asin, file.name, pageIndex + 1, quantityDefaults
+                asin, file.name, pageIndex + 1, quantityDefaults, isRepeatAsin
               );
               const currentQty = asinQtyData.get(asin) || 0;
               const newQty = currentQty + qty;
@@ -806,7 +817,7 @@ export const processPdfInvoices = async (
               seenAsinsOnPage.set(asin, i);
               const qty = extractQuantity(
                 line, lines, i,
-                asin, file.name, pageIndex + 1, quantityDefaults
+                asin, file.name, pageIndex + 1, quantityDefaults, isRepeatAsin
               );
               const currentQty = asinQtyData.get(asin) || 0;
               const newQty = currentQty + qty;
