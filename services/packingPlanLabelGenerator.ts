@@ -7,7 +7,6 @@ import {
   generateMRPLabel
 } from './pdfGenerator';
 import { isEmptyValue } from './utils';
-import { findColumnFlexible } from './flipkartUtils';
 
 /**
  * Generate labels by packet type (sticker or house)
@@ -66,23 +65,20 @@ export const generateLabelsByPacketUsed = async (
 
   // Generate Sticker labels (96mm × 25mm)
   for (const row of stickerProducts) {
-    const fnsku = String(row.FNSKU || '').trim();
     const qty = row.Qty || 0;
     const productName = row.item_name_for_labels || row.item || '';
 
-    if (fnsku && fnsku !== 'MISSING' && !isEmptyValue(fnsku)) {
-      // Find matching master product
-      const masterProduct = masterData.find(
-        (p) => p.FNSKU === fnsku || p.ASIN === row.ASIN
-      );
+    // Find master product by ASIN — ASIN uniquely identifies the product variant.
+    // FNSKU is an attribute of the master product, not the lookup key.
+    const masterProduct = masterData.find((p) => p.ASIN === row.ASIN);
+    const fnsku = String(masterProduct?.FNSKU || '').trim();
 
-      if (masterProduct) {
-        // Merge row data with master product to ensure item_name_for_labels is set (matches Streamlit approach)
+    if (masterProduct && fnsku && fnsku !== 'MISSING' && !isEmptyValue(fnsku)) {
+      {
         const productForLabel: MasterProduct = {
           ...masterProduct,
           'item_name_for_labels': productName || masterProduct.Name || '',
-          // Ensure FNSKU is set from row if master product doesn't have it
-          FNSKU: fnsku || masterProduct.FNSKU || ''
+          FNSKU: fnsku
         };
 
         for (let i = 0; i < qty; i++) {
@@ -99,77 +95,29 @@ export const generateLabelsByPacketUsed = async (
             console.warn(`Could not generate Sticker label for FNSKU ${fnsku} (${productName}):`, error);
           }
         }
-      } else {
-        skippedProducts.push({
-          Product: productName,
-          ASIN: row.ASIN || 'Unknown',
-          'Packet used': 'Sticker',
-          Reason: 'Product not found in master data'
-        });
       }
     } else {
       skippedProducts.push({
         Product: productName,
         ASIN: row.ASIN || 'Unknown',
         'Packet used': 'Sticker',
-        Reason: 'Missing FNSKU'
+        Reason: !masterProduct ? 'Product not found in master data' : 'Missing FNSKU'
       });
     }
   }
 
   // Generate House labels (50mm × 100mm triple labels)
   for (const row of houseProducts) {
-    const fnsku = String(row.FNSKU || '').trim();
     const qty = row.Qty || 0;
     const productName = row.item_name_for_labels || row.item || '';
-    const weight = String(row.weight || '').trim();
 
-    if (fnsku && fnsku !== 'MISSING' && !isEmptyValue(fnsku)) {
-      // Find matching master product - try multiple strategies
-      let masterProduct: MasterProduct | undefined;
-      
-      // Strategy 1: Match by FNSKU (primary method - most reliable)
-      masterProduct = masterData.find((p) => p.FNSKU === fnsku);
-      if (masterProduct) {
-        console.log(`[House Labels] Found master product by FNSKU: ${fnsku} -> ${masterProduct.Name || 'Unknown'}`);
-      }
-      
-      // Strategy 2: Match by ASIN (for Flipkart, ASIN field may contain SKU ID)
-      if (!masterProduct && row.ASIN) {
-        masterProduct = masterData.find((p) => p.ASIN === row.ASIN);
-        if (masterProduct) {
-          console.log(`[House Labels] Found master product by ASIN: ${row.ASIN} -> ${masterProduct.Name || 'Unknown'}`);
-        }
-      }
-      
-      // Strategy 3: Match by product name and weight (for Flipkart products)
-      if (!masterProduct && productName) {
-        // Use flexible column matching
-        const nameCol = findColumnFlexible(masterData, ['Name']);
-        const netWeightCol = findColumnFlexible(masterData, ['Net Weight', 'NetWeight']);
-        
-        if (nameCol && netWeightCol) {
-          // Try exact name match first
-          masterProduct = masterData.find((p) => {
-            const pName = String(p[nameCol] || '').trim().toLowerCase();
-            const pWeight = String(p[netWeightCol] || '').trim().toLowerCase();
-            return pName === productName.toLowerCase() && 
-                   (weight ? pWeight.includes(weight.toLowerCase()) || weight.toLowerCase().includes(pWeight) : true);
-          });
-          
-          // Try name contains match
-          if (!masterProduct) {
-            masterProduct = masterData.find((p) => {
-              const pName = String(p[nameCol] || '').trim().toLowerCase();
-              return pName.includes(productName.toLowerCase()) || productName.toLowerCase().includes(pName);
-            });
-          }
-          
-          if (masterProduct) {
-            console.log(`[House Labels] Found master product by name+weight: ${productName} -> ${masterProduct[nameCol] || 'Unknown'}`);
-          }
-        }
-      }
+    // Find master product by ASIN — ASIN uniquely identifies the product variant.
+    // FNSKU is an attribute of the master product used only for the barcode.
+    const masterProduct = masterData.find((p) => p.ASIN === row.ASIN);
+    const fnsku = String(masterProduct?.FNSKU || '').trim();
+
+    if (masterProduct && fnsku && fnsku !== 'MISSING' && !isEmptyValue(fnsku)) {
+      console.log(`[House Labels] Found master product by ASIN: ${row.ASIN} -> ${masterProduct.Name || 'Unknown'}, FNSKU: ${fnsku}`);
 
       // Find nutrition data - match Streamlit approach: simple case-insensitive contains match
       let nutritionRow: NutritionData | undefined;
@@ -260,19 +208,15 @@ export const generateLabelsByPacketUsed = async (
         }
       }
 
-      if (nutritionRow && masterProduct) {
-        // Merge row data with master product to ensure item_name_for_labels is set (matches Streamlit approach)
-        // Streamlit passes pd.DataFrame([row]) which includes item_name_for_labels
+      if (nutritionRow) {
         const productForLabel: MasterProduct = {
           ...masterProduct,
           'item_name_for_labels': productName || masterProduct.Name || '',
-          // Ensure FNSKU is set from row if master product doesn't have it
-          FNSKU: fnsku || masterProduct.FNSKU || ''
+          FNSKU: fnsku
         };
 
         for (let copyNum = 0; copyNum < qty; copyNum++) {
           try {
-            // Generate triple label - matches Streamlit generate_triple_label_combined
             const tripleLabelPdf = await generateTripleLabel(productForLabel, nutritionRow);
             const tripleBytes = tripleLabelPdf.output('arraybuffer');
             const tripleDoc = await PDFDocument.load(tripleBytes);
@@ -285,26 +229,20 @@ export const generateLabelsByPacketUsed = async (
           }
         }
       } else {
-        const reason = !masterProduct 
-          ? 'Missing master product data' 
-          : !nutritionRow 
-            ? 'Missing nutrition data' 
-            : 'Unknown error';
-        console.warn(`[House Labels] Skipped ${productName}: ${reason} (FNSKU: ${fnsku}, Master: ${masterProduct ? 'found' : 'not found'}, Nutrition: ${nutritionRow ? 'found' : 'not found'})`);
+        console.warn(`[House Labels] Skipped ${productName}: Missing nutrition data`);
         skippedProducts.push({
           Product: productName,
           ASIN: row.ASIN || 'Unknown',
           'Packet used': 'House',
-          Reason: reason
+          Reason: 'Missing nutrition data'
         });
       }
     } else {
-      console.warn(`[House Labels] Skipped ${productName}: Missing FNSKU`);
       skippedProducts.push({
         Product: productName,
         ASIN: row.ASIN || 'Unknown',
         'Packet used': 'House',
-        Reason: 'Missing FNSKU'
+        Reason: !masterProduct ? 'Product not found in master data' : 'Missing FNSKU'
       });
     }
   }
@@ -348,17 +286,18 @@ export const generateCombinedVerticalLabels = async (
   let combinedVerticalCount = 0;
 
   for (const row of eligibleItems) {
-    const fnsku = String(row.FNSKU || '').trim();
     const qty = row.Qty || 0;
     const productName = row.item_name_for_labels || row.item || '';
 
-    const masterProduct = masterData.find(p => p.FNSKU === fnsku || p.ASIN === row.ASIN);
+    const masterProduct = masterData.find(p => p.ASIN === row.ASIN);
     if (!masterProduct) continue;
+    const resolvedFnsku = String(masterProduct.FNSKU || '').trim();
+    if (!resolvedFnsku || resolvedFnsku === 'MISSING' || isEmptyValue(resolvedFnsku)) continue;
 
     const productForLabel: MasterProduct = {
       ...masterProduct,
       'item_name_for_labels': productName || masterProduct.Name || '',
-      FNSKU: fnsku || masterProduct.FNSKU || ''
+      FNSKU: resolvedFnsku
     };
 
     for (let i = 0; i < qty; i++) {
